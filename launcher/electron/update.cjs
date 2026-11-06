@@ -313,7 +313,10 @@ function createUpdateController({
 }) {
   const deps = { ...defaultDependencies(), ...dependencies };
   const supportedAsset = releaseAssetName(currentVersion, platform, arch);
-  let state = packaged && supportedAsset ? { status: "idle" } : { status: "disabled" };
+  // Aspace OS V5 Zero-Telemetry / Zero-Phone-Home policy: external GitHub release checks are disabled
+  // by default unless ASPACE_ALLOW_EXTERNAL_UPDATE=1 is explicitly set.
+  const externalUpdateAllowed = process.env.ASPACE_ALLOW_EXTERNAL_UPDATE === "1";
+  let state = externalUpdateAllowed && packaged && supportedAsset ? { status: "idle" } : { status: "disabled" };
   let checked = false;
   let failedChecks = 0;
   let pending = null;

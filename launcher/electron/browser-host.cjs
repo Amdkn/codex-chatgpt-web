@@ -26,6 +26,11 @@ const {
   scaleBrowserBounds,
   shellZoomActionForInput,
 } = require("./browser-state.cjs");
+const {
+  ASPACE_AUTH_PROVIDER_HOSTS,
+  ASPACE_DOM_TELEMETRY_SHIELD_SCRIPT,
+  installAspaceTelemetryShield,
+} = require("./aspace-telemetry-shield.cjs");
 
 const NEW_CHAT_URL = "https://chatgpt.com/";
 const CHATGPT_ORIGIN = "https://chatgpt.com";
@@ -75,6 +80,7 @@ const AUTH_PROVIDER_HOSTS = new Set([
   "login.microsoftonline.com",
   "appleid.apple.com",
   "idmsa.apple.com",
+  ...ASPACE_AUTH_PROVIDER_HOSTS,
 ]);
 const CLOUDFLARE_CHALLENGE_RECOVERY_DELAY_MS = 500;
 const CLOUDFLARE_CHALLENGE_RECOVERY_SETTLE_MS = 1_000;
@@ -430,6 +436,7 @@ class BrowserHost {
         backgroundThrottling: true,
       },
     });
+    this.aspaceTelemetryShield = installAspaceTelemetryShield(this.view.webContents.session, this.logger);
     // Browser surfaces stay below native launcher notices, including new tabs.
     window.contentView.addChildView(this.view, 0);
     this.windowVisibilityListener = () => this.syncViewVisibility();
@@ -950,6 +957,7 @@ class BrowserHost {
       });
       document.documentElement.dataset.codexWebGptSurface = ${encoded};
       (${configureChatGptAnnouncementDismissal.toString()})(true);
+      ${ASPACE_DOM_TELEMETRY_SHIELD_SCRIPT};
     })()`, true);
   }
 
@@ -2071,6 +2079,7 @@ class BrowserHost {
       });
       document.documentElement.dataset.codexWebGptSurface = ${surfaceId};
       (${configureChatGptAnnouncementDismissal.toString()})(true);
+      ${ASPACE_DOM_TELEMETRY_SHIELD_SCRIPT};
     })()`);
   }
 
