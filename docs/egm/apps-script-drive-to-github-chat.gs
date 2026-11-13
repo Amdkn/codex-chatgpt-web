@@ -1,16 +1,11 @@
 /**
  * Aspace OS V5 · Phase 5 — Google Apps Script Poller (V0.1-P5-U1)
  *
- * Surveille les dossiers Drive LDo8 (`CPU-CLI` et `CPU CLI-Plateformes-Unifier`),
- * extrait le contenu texte (Google Docs + Markdown/JSON/GS) avec curseur
- * idempotent par fichier (`PROCESSED_VERSIONS_JSON`), et déclenche :
- *   1. GitHub Actions (`repository_dispatch` -> `aspace_drive_manifest`)
- *   2. Google Chat Space LD08 (si `GCHAT_LD08_WEBHOOK_URL` est défini)
- *
- * Installation (1 fois dans script.google.com) :
- *   1. Propriétés du script -> ajouter `GITHUB_PAT` (scope repo)
- *      et optionnellement `GCHAT_LD08_WEBHOOK_URL`
- *   2. Exécuter `testDryRunPoll()` puis `installEveryMinuteTrigger()`
+ * Surveille récursivement les dossiers Drive LDo8 (`CPU-CLI` et `CPU CLI-Plateformes-Unifier`),
+ * extrait le texte (Google Docs + fichiers texte/Markdown/JSON/GS, hors conteneurs Google),
+ * gère un curseur idempotent borné à 80 entrées (< 9 KB quota ScriptProperties),
+ * puis déclenche GitHub Actions (`repository_dispatch` -> `aspace_drive_manifest`)
+ * et notifie Google Chat Space LD08 uniquement après succès GitHub.
  */
 
 const DRIVE_ROOTS = [
@@ -19,6 +14,7 @@ const DRIVE_ROOTS = [
 ];
 const GITHUB_OWNER = "Amdkn";
 const GITHUB_REPO = "codex-chatgpt-web";
+const MAX_TRACKED_FILES = 80; // Reste strictement sous la limite 9 KB par ScriptProperty
 
 function loadProcessedVersions_(props) {
   try {
@@ -31,24 +27,31 @@ function loadProcessedVersions_(props) {
 }
 
 function saveProcessedVersions_(props, map) {
-  const entries = Object.entries(map);
-  if (entries.length > 200) {
+  let entries = Object.entries(map);
+  if (entries.length > MAX_TRACKED_FILES) {
     entries.sort((a, b) => String(b[1]).localeCompare(String(a[1])));
-    map = Object.fromEntries(entries.slice(0, 200));
+    entries = entries.slice(0, MAX_TRACKED_FILES);
   }
-  props.setProperty("PROCESSED_VERSIONS_JSON", JSON.stringify(map));
+  let payload = JSON.stringify(Object.fromEntries(entries));
+  while (payload.length > 8000 && entries.length > 10) {
+    entries.pop();
+    payload = JSON.stringify(Object.fromEntries(entries));
+  }
+  props.setProperty("PROCESSED_VERSIONS_JSON", payload);
 }
 
 function readManifestExcerpt_(file) {
   try {
-    const mime = file.getMimeType();
+    const mime = String(file.getMimeType() || "");
     if (mime === MimeType.GOOGLE_DOCS) {
       return DocumentApp.openById(file.getId()).getBody().getText().slice(0, 1200);
+    }
+    if (mime.indexOf("application/vnd.google-apps.") === 0) {
+      return "";
     }
     if (
       mime.indexOf("text/") === 0 ||
       mime === "application/json" ||
-      mime === "application/vnd.google-apps.script" ||
       /\.(md|txt|json|yml|yaml|gs|ts|js|ps1)$/i.test(file.getName())
     ) {
       return file.getBlob().getDataAsString("UTF-8").slice(0, 1200);
@@ -59,25 +62,17 @@ function readManifestExcerpt_(file) {
   return "";
 }
 
-function collectDriveFiles_(root) {
-  const collected = [];
-  const rootFolder = DriveApp.getFolderById(root.id);
-
-  const rootFiles = rootFolder.getFiles();
-  while (rootFiles.hasNext()) {
-    collected.push({ file: rootFiles.next(), versionFolder: root.label });
+function collectFolderFilesRecursive_(folder, labelPrefix, depth, collected) {
+  const files = folder.getFiles();
+  while (files.hasNext()) {
+    collected.push({ file: files.next(), versionFolder: labelPrefix });
   }
-
-  const subfolders = rootFolder.getFolders();
+  if (depth >= 4) return;
+  const subfolders = folder.getFolders();
   while (subfolders.hasNext()) {
     const sub = subfolders.next();
-    const versionFolder = root.label + "/" + sub.getName();
-    const files = sub.getFiles();
-    while (files.hasNext()) {
-      collected.push({ file: files.next(), versionFolder: versionFolder });
-    }
+    collectFolderFilesRecursive_(sub, labelPrefix + "/" + sub.getName(), depth + 1, collected);
   }
-  return collected;
 }
 
 function dispatchToGitHub_(pat, payload) {
@@ -110,6 +105,9 @@ function dispatchToGitHub_(pat, payload) {
 
 function notifyGoogleChatLd08_(webhookUrl, payload) {
   if (!webhookUrl) return { ok: false, skipped: true };
+  if (webhookUrl.indexOf("https://chat.googleapis.com/") !== 0) {
+    return { ok: false, status: 0, reason: "invalid_webhook_origin" };
+  }
   const res = UrlFetchApp.fetch(webhookUrl, {
     method: "post",
     contentType: "application/json",
@@ -136,57 +134,72 @@ function pollLDo8ManifestsAndDispatch(options) {
   const processed = loadProcessedVersions_(props);
   const nowIso = new Date().toISOString();
 
-  const summary = { checked: 0, dispatched: [], skipped: [], errors: [] };
+  const summary = { checked: 0, dispatched: [], skipped: [], warnings: [], errors: [] };
 
-  for (let i = 0; i < DRIVE_ROOTS.length; i++) {
-    const entries = collectDriveFiles_(DRIVE_ROOTS[i]);
-    for (let j = 0; j < entries.length; j++) {
-      const entry = entries[j];
-      const file = entry.file;
-      const fileId = file.getId();
-      const updatedIso = file.getLastUpdated().toISOString();
-      summary.checked++;
-
-      if (processed[fileId] === updatedIso) {
-        summary.skipped.push(file.getName());
+  try {
+    for (let i = 0; i < DRIVE_ROOTS.length; i++) {
+      const root = DRIVE_ROOTS[i];
+      const entries = [];
+      try {
+        const rootFolder = DriveApp.getFolderById(root.id);
+        collectFolderFilesRecursive_(rootFolder, root.label, 0, entries);
+      } catch (folderErr) {
+        summary.errors.push({ root: root.label, reason: folderErr.message });
         continue;
       }
 
-      const payload = {
-        manifest_id: fileId,
-        manifest_name: file.getName(),
-        version_folder: entry.versionFolder,
-        manifest_url: file.getUrl(),
-        updated_at: updatedIso,
-        excerpt: readManifestExcerpt_(file),
-        source: "apps-script-drive-poll",
-      };
+      for (let j = 0; j < entries.length; j++) {
+        const entry = entries[j];
+        const file = entry.file;
+        const fileId = file.getId();
+        const updatedIso = file.getLastUpdated().toISOString();
+        summary.checked++;
 
-      if (dryRun) {
-        summary.dispatched.push({ file: payload.manifest_name, version: payload.version_folder, dryRun: true });
-        continue;
-      }
+        if (processed[fileId] === updatedIso) {
+          summary.skipped.push(file.getName());
+          continue;
+        }
 
-      const ghOut = dispatchToGitHub_(pat, payload);
-      const chatOut = notifyGoogleChatLd08_(gchatWebhook, payload);
+        const payload = {
+          manifest_id: fileId,
+          manifest_name: file.getName(),
+          version_folder: entry.versionFolder,
+          manifest_url: file.getUrl(),
+          updated_at: updatedIso,
+          excerpt: readManifestExcerpt_(file),
+          source: "apps-script-drive-poll",
+        };
 
-      if (ghOut.ok || (!pat && chatOut.ok)) {
+        if (dryRun) {
+          summary.dispatched.push({ file: payload.manifest_name, version: payload.version_folder, dryRun: true });
+          continue;
+        }
+
+        const ghOut = dispatchToGitHub_(pat, payload);
+        if (!ghOut.ok) {
+          summary.errors.push({
+            file: payload.manifest_name,
+            ghStatus: ghOut.status || 0,
+            reason: ghOut.reason || ghOut.body || "github_dispatch_failed",
+          });
+          continue;
+        }
+
         processed[fileId] = updatedIso;
+        const chatOut = notifyGoogleChatLd08_(gchatWebhook, payload);
+        if (gchatWebhook && !chatOut.ok && !chatOut.skipped) {
+          summary.warnings.push({ file: payload.manifest_name, chatStatus: chatOut.status || 0, reason: chatOut.reason || "chat_notify_failed" });
+        }
         summary.dispatched.push({ file: payload.manifest_name, version: payload.version_folder, ghStatus: ghOut.status });
-      } else {
-        summary.errors.push({
-          file: payload.manifest_name,
-          ghStatus: ghOut.status || 0,
-          reason: ghOut.reason || ghOut.body || "dispatch_failed",
-        });
       }
+    }
+  } finally {
+    if (!dryRun) {
+      saveProcessedVersions_(props, processed);
+      props.setProperty("LAST_POLL_ISO", nowIso);
     }
   }
 
-  if (!dryRun) {
-    saveProcessedVersions_(props, processed);
-    props.setProperty("LAST_POLL_ISO", nowIso);
-  }
   Logger.log(JSON.stringify(summary));
   return summary;
 }

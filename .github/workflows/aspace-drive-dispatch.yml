@@ -54,19 +54,20 @@ jobs:
           EXCERPT: ${{ github.event.client_payload.excerpt || inputs.excerpt || '' }}
           DISPATCH_SOURCE: ${{ github.event_name == 'repository_dispatch' && 'apps-script-drive-poll' || 'github-workflow-dispatch' }}
         run: |
-          bun run src/cli.ts palier dispatch-manifest \
-            --name "$MANIFEST_NAME" \
-            --id "$MANIFEST_ID" \
-            --folder "$VERSION_FOLDER" \
-            --url "$MANIFEST_URL" \
-            --source "$DISPATCH_SOURCE" \
-            --excerpt "$EXCERPT" \
-            --out docs/egm/goldfish \
-            --skip-factory-intake \
-            --json
+          ARGS=(palier dispatch-manifest --name "$MANIFEST_NAME" --id "$MANIFEST_ID" --folder "$VERSION_FOLDER" --source "$DISPATCH_SOURCE" --out docs/egm/goldfish --skip-factory-intake --json)
+          if [ -n "$MANIFEST_URL" ]; then
+            ARGS+=(--url "$MANIFEST_URL")
+          fi
+          if [ -n "$EXCERPT" ]; then
+            EXCERPT_B64=$(printf '%s' "$EXCERPT" | base64 | tr -d '\n')
+            ARGS+=(--excerpt-b64 "$EXCERPT_B64")
+          fi
+          bun run src/cli.ts "${ARGS[@]}"
 
       - name: Run CPU Palier & Wiring Tests
         run: |
+          bun run typecheck
+          bun run --cwd launcher typecheck
           bun test ./tests/aspace-palier-orchestrator.test.ts
           node --test launcher/tests/local-chrome-cdp.test.cjs launcher/tests/renderer-wiring.test.cjs
 

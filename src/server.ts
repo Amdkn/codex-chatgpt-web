@@ -1309,54 +1309,86 @@ export function startServer(
         return Response.json(await collectSuperAgentStatus());
       }
       if (req.method === "POST" && url.pathname === "/v1/aspace/superagent/pause") {
-        const body = (await readJsonRequestBody(req)) as Record<string, unknown>;
-        await callSuperAgentOrchestrator("POST", "executor/pause", { paused: body.paused === true });
-        return Response.json(await collectSuperAgentStatus());
+        try {
+          const body = (await readJsonRequestBody(req)) as Record<string, unknown>;
+          await callSuperAgentOrchestrator("POST", "executor/pause", { paused: body.paused === true });
+          return Response.json(await collectSuperAgentStatus());
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          return formatErrorResponse(502, "upstream_error", message);
+        }
       }
       if (req.method === "POST" && url.pathname === "/v1/aspace/superagent/ld08-webhook") {
-        const body = (await readJsonRequestBody(req)) as Record<string, unknown>;
-        ensureSuperAgentProfileProvisioned();
-        const saved = writeSuperAgentBridgeConfig({
-          ...(typeof body.webhookUrl === "string" ? { ld08WebhookUrl: body.webhookUrl.trim() } : {}),
-          ...(typeof body.devAutoMergeEnabled === "boolean" ? { devAutoMergeEnabled: body.devAutoMergeEnabled } : {}),
-        });
-        return Response.json({ ok: true, bridge: saved });
+        try {
+          const body = (await readJsonRequestBody(req)) as Record<string, unknown>;
+          ensureSuperAgentProfileProvisioned();
+          const saved = writeSuperAgentBridgeConfig({
+            ...(typeof body.webhookUrl === "string" ? { ld08WebhookUrl: body.webhookUrl.trim() } : {}),
+            ...(typeof body.devAutoMergeEnabled === "boolean" ? { devAutoMergeEnabled: body.devAutoMergeEnabled } : {}),
+          });
+          const ld08WebhookConfigured = Boolean(
+            (typeof saved.ld08WebhookUrl === "string" && saved.ld08WebhookUrl.trim()) ||
+            process.env.GCHAT_LD08_WEBHOOK_URL,
+          );
+          return Response.json({
+            ok: true,
+            bridge: {
+              ld08WebhookConfigured,
+              devAutoMergeEnabled: saved.devAutoMergeEnabled !== false,
+            },
+          });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          return formatErrorResponse(400, "invalid_request_error", message);
+        }
       }
       if (req.method === "POST" && url.pathname === "/v1/aspace/superagent/notify-ld08") {
-        const body = (await readJsonRequestBody(req)) as Record<string, unknown>;
-        const tag = typeof body.tag === "string" && body.tag.trim() ? body.tag.trim() : "person/delivery";
-        const message = typeof body.message === "string" && body.message.trim()
-          ? body.message.trim()
-          : "Signal CPU — CLI-Plateformes-Unifié SuperAgent LD08";
-        const webhookUrl = typeof body.webhookUrl === "string" ? body.webhookUrl.trim() : undefined;
-        return Response.json(await dispatchGoogleChatLD08(tag, message, webhookUrl));
+        try {
+          const body = (await readJsonRequestBody(req)) as Record<string, unknown>;
+          const tag = typeof body.tag === "string" && body.tag.trim() ? body.tag.trim() : "person/delivery";
+          const message = typeof body.message === "string" && body.message.trim()
+            ? body.message.trim()
+            : "Signal CPU — CLI-Plateformes-Unifié SuperAgent LD08";
+          const webhookUrl = typeof body.webhookUrl === "string" ? body.webhookUrl.trim() : undefined;
+          return Response.json(await dispatchGoogleChatLD08(tag, message, webhookUrl));
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          const status = /invalide|non configuré|HTTPS|chat\.googleapis\.com/i.test(message) ? 400 : 502;
+          return formatErrorResponse(status, status === 400 ? "invalid_request_error" : "upstream_error", message);
+        }
       }
       if (req.method === "GET" && url.pathname === "/v1/aspace/egm/missions") {
         return Response.json(listEgmGoldfishMissions());
       }
       if (req.method === "POST" && url.pathname === "/v1/aspace/egm/dispatch") {
-        const body = (await readJsonRequestBody(req)) as Record<string, unknown>;
-        const manifestName = typeof body.manifestName === "string" ? body.manifestName.trim() : "";
-        if (!manifestName) {
-          return formatErrorResponse(400, "invalid_request_error", "manifestName is required");
+        try {
+          const body = (await readJsonRequestBody(req)) as Record<string, unknown>;
+          const manifestName = typeof body.manifestName === "string" ? body.manifestName.trim() : "";
+          if (!manifestName) {
+            return formatErrorResponse(400, "invalid_request_error", "manifestName is required");
+          }
+          const result = await dispatchDriveManifestToEgmGoldfish({
+            manifestName,
+            manifestId: typeof body.manifestId === "string" ? body.manifestId : undefined,
+            versionFolder: typeof body.versionFolder === "string" ? body.versionFolder : undefined,
+            manifestUrl: typeof body.manifestUrl === "string" ? body.manifestUrl : undefined,
+            excerpt: typeof body.excerpt === "string" ? body.excerpt : undefined,
+            source: typeof body.source === "string" ? body.source : undefined,
+            outDir: typeof body.outDir === "string" ? body.outDir : undefined,
+            restrictOutDir: true,
+            repo: typeof body.repo === "string" ? body.repo : undefined,
+            notifyLd08: body.notifyLd08 === true,
+            requireLd08: body.requireLd08 === true,
+            triggerGithubDispatch: body.triggerGithubDispatch === true,
+            skipFactoryIntake: body.skipFactoryIntake === true,
+            force: body.force === true,
+            tag: typeof body.tag === "string" ? body.tag : undefined,
+          });
+          return Response.json(result);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          return formatErrorResponse(400, "invalid_request_error", message);
         }
-        const result = await dispatchDriveManifestToEgmGoldfish({
-          manifestName,
-          manifestId: typeof body.manifestId === "string" ? body.manifestId : undefined,
-          versionFolder: typeof body.versionFolder === "string" ? body.versionFolder : undefined,
-          manifestUrl: typeof body.manifestUrl === "string" ? body.manifestUrl : undefined,
-          excerpt: typeof body.excerpt === "string" ? body.excerpt : undefined,
-          source: typeof body.source === "string" ? body.source : undefined,
-          outDir: typeof body.outDir === "string" ? body.outDir : undefined,
-          repo: typeof body.repo === "string" ? body.repo : undefined,
-          notifyLd08: body.notifyLd08 === true,
-          requireLd08: body.requireLd08 === true,
-          triggerGithubDispatch: body.triggerGithubDispatch === true,
-          skipFactoryIntake: body.skipFactoryIntake === true,
-          force: body.force === true,
-          tag: typeof body.tag === "string" ? body.tag : undefined,
-        });
-        return Response.json(result);
       }
       if (req.method === "POST" && (url.pathname === "/v1/chat/completions" || url.pathname === "/v1/messages")) {
         if (draining) return formatErrorResponse(503, "server_error", "codex-chatgpt-web is draining for a requested service operation");

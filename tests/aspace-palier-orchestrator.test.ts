@@ -156,12 +156,30 @@ describe("Aspace Paliers 1-3 orchestrator", () => {
         });
         expect(hookRes.status).toBe(200);
 
+        const ssrfRes = await fetch(`${base}/v1/aspace/superagent/ld08-webhook`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ webhookUrl: "http://evil.example/hook" }),
+        });
+        expect(ssrfRes.status).toBe(400);
+
         const badEgmRes = await fetch(`${base}/v1/aspace/egm/dispatch`, {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({}),
         });
         expect(badEgmRes.status).toBe(400);
+
+        const traversalRes = await fetch(`${base}/v1/aspace/egm/dispatch`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            manifestName: "evil.md",
+            outDir: join(import.meta.dir, "..", "src"),
+            skipFactoryIntake: true,
+          }),
+        });
+        expect(traversalRes.status).toBe(400);
 
         const receivedChatPayloads: Array<{ text?: string }> = [];
         const mockWebhook = Bun.serve({
@@ -171,12 +189,18 @@ describe("Aspace Paliers 1-3 orchestrator", () => {
             return Response.json({ ok: true });
           },
         });
+        const prevLoopbackTest = process.env.ASPACE_ALLOW_LOCALHOST_WEBHOOK_TEST;
+        process.env.ASPACE_ALLOW_LOCALHOST_WEBHOOK_TEST = "1";
         try {
-          await fetch(`${base}/v1/aspace/superagent/ld08-webhook`, {
+          const saveHookRes = await fetch(`${base}/v1/aspace/superagent/ld08-webhook`, {
             method: "POST",
             headers: { "content-type": "application/json" },
             body: JSON.stringify({ webhookUrl: `http://127.0.0.1:${mockWebhook.port}/ld08`, devAutoMergeEnabled: true }),
           });
+          expect(saveHookRes.status).toBe(200);
+          const saveHookJson = await saveHookRes.json() as { bridge: Record<string, unknown> };
+          expect("ld08WebhookUrl" in saveHookJson.bridge).toBe(false);
+          expect(saveHookJson.bridge.ld08WebhookConfigured).toBe(true);
 
           const gfOut = join(tmpDsh, "goldfish-http");
           const dispatchRes = await fetch(`${base}/v1/aspace/egm/dispatch`, {
@@ -233,6 +257,8 @@ describe("Aspace Paliers 1-3 orchestrator", () => {
           expect(listJson.count).toBe(1);
           expect(listJson.missions[0]?.missionId).toBe(dispatchJson.mission.missionId);
         } finally {
+          if (prevLoopbackTest === undefined) delete process.env.ASPACE_ALLOW_LOCALHOST_WEBHOOK_TEST;
+          else process.env.ASPACE_ALLOW_LOCALHOST_WEBHOOK_TEST = prevLoopbackTest;
           mockWebhook.stop(true);
         }
       } finally {
@@ -248,7 +274,7 @@ describe("Aspace Paliers 1-3 orchestrator", () => {
     }
   });
 
-  test("CLI palier dispatch-manifest writes deterministic Goldfish contract", () => {
+  test("CLI palier dispatch-manifest handles empty flags and --- frontmatter excerpts cleanly", () => {
     const tmpDsh = mkdtempSync(join(tmpdir(), "ccw-cli-goldfish-"));
     const gfOut = join(tmpDsh, "contracts");
     try {
@@ -265,8 +291,10 @@ describe("Aspace Paliers 1-3 orchestrator", () => {
           "cli-001",
           "--folder",
           "V0.1",
+          "--url",
+          "",
           "--excerpt",
-          "CLI Goldfish payload",
+          "---\ntype: manifest\n---\nCLI Goldfish payload",
           "--out",
           gfOut,
           "--skip-factory-intake",
@@ -281,11 +309,12 @@ describe("Aspace Paliers 1-3 orchestrator", () => {
       const parsed = JSON.parse(new TextDecoder().decode(res.stdout)) as {
         ok: boolean;
         contractPath: string;
-        mission: { manifestName: string; versionFolder: string };
+        mission: { manifestName: string; versionFolder: string; excerpt: string };
       };
       expect(parsed.ok).toBe(true);
       expect(parsed.mission.manifestName).toBe("V0.1_CLI_Manifest.md");
       expect(parsed.mission.versionFolder).toBe("V0.1");
+      expect(parsed.mission.excerpt).toContain("type: manifest");
       expect(existsSync(parsed.contractPath)).toBe(true);
     } finally {
       rmSync(tmpDsh, { recursive: true, force: true });

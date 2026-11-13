@@ -27,6 +27,8 @@ const {
   listEgmGoldfishMissions,
   orchestratorRequest,
   readBridgeConfig,
+  triggerDevAutoMerge,
+  validateGoogleChatWebhookUrl,
   writeBridgeConfig,
 } = require("../electron/aspace-superagent-bridge.cjs");
 
@@ -416,6 +418,31 @@ test("CJS Phase 5 dispatchDriveManifestToEgmGoldfish persists idempotent Goldfis
     const list = listEgmGoldfishMissions();
     assert.equal(list.count, 1);
     assert.equal(list.missions[0].missionId, first.mission.missionId);
+
+    // Différent outDir -> ne déduplique pas sur l'ancien chemin
+    const outDir2 = path.join(tmpDsh, "goldfish-alt");
+    const alt = await dispatchDriveManifestToEgmGoldfish({
+      manifestId: "drive-cjs-001",
+      manifestName: "V0.1_Phases_1_9_CPU_Contrat.md",
+      versionFolder: "V0.1",
+      excerpt: "Validation Phase 5 depuis bridge Electron CJS",
+      outDir: outDir2,
+      skipFactoryIntake: true,
+    });
+    assert.equal(alt.deduplicated, false);
+    assert.equal(fs.existsSync(alt.contractPath), true);
+
+    // Validation Webhook LD08 & Isolation Prod/Dev
+    assert.match(
+      validateGoogleChatWebhookUrl("https://chat.googleapis.com/v1/spaces/ABC/messages?key=k&token=t"),
+      /^https:\/\/chat\.googleapis\.com\//,
+    );
+    assert.throws(() => validateGoogleChatWebhookUrl("http://chat.googleapis.com/v1/spaces/x"), /HTTPS/);
+    assert.throws(() => validateGoogleChatWebhookUrl("https://evil.example/hook"), /chat\.googleapis\.com/);
+
+    for (const blocked of ["main", "master", "prod/v1", "production-hotfix", "release/1.0", "--admin", "aspace-v5-native"]) {
+      await assert.rejects(() => triggerDevAutoMerge(blocked), /Auto-merge|invalide/i);
+    }
   } finally {
     if (prevDsh === undefined) delete process.env.DSH_HOME;
     else process.env.DSH_HOME = prevDsh;

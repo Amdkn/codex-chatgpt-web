@@ -5,9 +5,9 @@
  */
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 export const SUPERAGENT_PORT = Number.parseInt(process.env.ASPACE_SUPERAGENT_PORT || "3082", 10);
 export const SUPERAGENT_BASE_URL = `http://127.0.0.1:${SUPERAGENT_PORT}`;
@@ -39,11 +39,51 @@ export function readSuperAgentBridgeConfig(): Record<string, unknown> {
   }
 }
 
+function atomicWriteFileSync(targetPath: string, content: string): void {
+  const dir = dirname(targetPath);
+  mkdirSync(dir, { recursive: true });
+  const tmpPath = join(dir, `.${basename(targetPath)}.tmp.${process.pid}.${Date.now()}`);
+  writeFileSync(tmpPath, content, "utf8");
+  renameSync(tmpPath, targetPath);
+}
+
+export function validateGoogleChatWebhookUrl(rawUrl: string): string {
+  const trimmed = String(rawUrl || "").trim();
+  if (!trimmed) throw new Error("Webhook Google Chat LD08 vide");
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    throw new Error("URL Webhook Google Chat LD08 invalide");
+  }
+  const allowLoopbackTest = process.env.ASPACE_ALLOW_LOCALHOST_WEBHOOK_TEST === "1";
+  const isLoopback = parsed.hostname === "127.0.0.1" || parsed.hostname === "localhost" || parsed.hostname === "::1";
+  if (allowLoopbackTest && (parsed.protocol === "http:" || parsed.protocol === "https:") && isLoopback) {
+    return parsed.toString();
+  }
+  if (parsed.protocol !== "https:" || parsed.hostname.toLowerCase() !== "chat.googleapis.com") {
+    throw new Error("Webhook Google Chat LD08 doit utiliser HTTPS sur chat.googleapis.com");
+  }
+  return parsed.toString();
+}
+
+function isWithinDirectory(candidatePath: string, rootDir: string): boolean {
+  const rel = relative(resolve(rootDir), resolve(candidatePath));
+  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+}
+
 export function writeSuperAgentBridgeConfig(patch: Record<string, unknown>): Record<string, unknown> {
-  const { stateDir, bridgeConfigPath } = getSuperAgentPaths();
-  mkdirSync(stateDir, { recursive: true });
-  const next = { ...readSuperAgentBridgeConfig(), ...patch, updatedAt: new Date().toISOString() };
-  writeFileSync(bridgeConfigPath, `${JSON.stringify(next, null, 2)}\n`, "utf8");
+  const { bridgeConfigPath } = getSuperAgentPaths();
+  const safePatch: Record<string, unknown> = {};
+  if (typeof patch.ld08WebhookUrl === "string") {
+    const trimmed = patch.ld08WebhookUrl.trim();
+    safePatch.ld08WebhookUrl = trimmed ? validateGoogleChatWebhookUrl(trimmed) : "";
+  }
+  if (typeof patch.devAutoMergeEnabled === "boolean") {
+    safePatch.devAutoMergeEnabled = patch.devAutoMergeEnabled;
+  }
+  const next = { ...readSuperAgentBridgeConfig(), ...safePatch, updatedAt: new Date().toISOString() };
+  atomicWriteFileSync(bridgeConfigPath, `${JSON.stringify(next, null, 2)}\n`);
   return next;
 }
 
@@ -108,9 +148,18 @@ export async function callSuperAgentOrchestrator(
     signal: AbortSignal.timeout(1500),
   });
   const text = await res.text();
-  const parsed = text.trim() ? JSON.parse(text) : null;
+  let parsed: unknown = null;
+  if (text.trim()) {
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      parsed = null;
+    }
+  }
   if (!res.ok) {
-    const errMsg = parsed && typeof parsed === "object" && "error" in parsed ? String((parsed as Record<string, unknown>).error) : `HTTP ${res.status}`;
+    const errMsg = parsed && typeof parsed === "object" && "error" in parsed
+      ? String((parsed as Record<string, unknown>).error)
+      : `HTTP ${res.status}`;
     throw new Error(errMsg);
   }
   return parsed;
@@ -207,6 +256,7 @@ export interface DriveManifestDispatchInput {
   requireLd08?: boolean;
   triggerGithubDispatch?: boolean;
   skipFactoryIntake?: boolean;
+  restrictOutDir?: boolean;
   force?: boolean;
   tag?: string;
 }
@@ -236,14 +286,13 @@ function readGoldfishQueueFile(): { version: number; updatedAt: string | null; m
 }
 
 function writeGoldfishQueueFile(missions: EgmGoldfishMission[]): string {
-  const { stateDir, goldfishQueuePath } = getSuperAgentPaths();
-  mkdirSync(stateDir, { recursive: true });
+  const { goldfishQueuePath } = getSuperAgentPaths();
   const payload = {
     version: 1,
     updatedAt: new Date().toISOString(),
     missions: missions.slice(0, 50),
   };
-  writeFileSync(goldfishQueuePath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+  atomicWriteFileSync(goldfishQueuePath, `${JSON.stringify(payload, null, 2)}\n`);
   return goldfishQueuePath;
 }
 
@@ -362,6 +411,9 @@ function tryGithubRepositoryDispatch(
   mission: EgmGoldfishMission,
   repoRoot: string,
 ): NonNullable<EgmGoldfishMission["githubDispatch"]> {
+  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) {
+    return { attempted: false, dispatched: false, repo, error: "invalid_github_repo_slug" };
+  }
   const payload = JSON.stringify({
     event_type: "aspace_drive_manifest",
     client_payload: {
@@ -377,7 +429,14 @@ function tryGithubRepositoryDispatch(
   const res = spawnSync(
     "gh",
     ["api", `repos/${repo}/dispatches`, "--method", "POST", "--input", "-"],
-    { cwd: repoRoot, input: payload, encoding: "utf8", timeout: 8000, windowsHide: true },
+    {
+      cwd: repoRoot,
+      input: payload,
+      encoding: "utf8",
+      timeout: 8000,
+      windowsHide: true,
+      env: { ...process.env, DO_NOT_TRACK: "1" },
+    },
   );
   if (res.error || res.status !== 0) {
     return {
@@ -421,11 +480,23 @@ export async function dispatchDriveManifestToEgmGoldfish(input: DriveManifestDis
     : process.env.ASPACE_GOLDFISH_OUT_DIR?.trim()
       ? resolve(process.env.ASPACE_GOLDFISH_OUT_DIR.trim())
       : join(stateDir, "goldfish");
+  if (input.restrictOutDir && input.outDir?.trim()) {
+    const allowedRoots = [stateDir, join(repoRoot, "docs", "egm", "goldfish"), tmpdir()];
+    if (!allowedRoots.some((root) => isWithinDirectory(outDir, root))) {
+      throw new Error("outDir outside allowed Goldfish roots");
+    }
+  }
   const contractPath = join(outDir, `${missionId}.md`);
 
   const queue = readGoldfishQueueFile();
   const existing = queue.missions.find((item) => item.missionId === missionId);
-  if (existing && existing.checksumSha256 === checksumSha256 && !input.force && existsSync(existing.contractPath)) {
+  if (
+    existing &&
+    existing.checksumSha256 === checksumSha256 &&
+    !input.force &&
+    resolve(existing.contractPath) === resolve(contractPath) &&
+    existsSync(existing.contractPath)
+  ) {
     return {
       ok: true,
       deduplicated: true,
@@ -467,6 +538,7 @@ export async function dispatchDriveManifestToEgmGoldfish(input: DriveManifestDis
     mission.githubDispatch = tryGithubRepositoryDispatch(repo, mission, repoRoot);
   }
 
+  let requiredLd08Failure: Error | null = null;
   if (input.notifyLd08 || input.requireLd08) {
     const tag = String(input.tag || "person/delivery").trim() || "person/delivery";
     const bridge = readSuperAgentBridgeConfig();
@@ -477,21 +549,33 @@ export async function dispatchDriveManifestToEgmGoldfish(input: DriveManifestDis
     if (!hasWebhook && !input.requireLd08) {
       mission.ld08Notification = { attempted: false, delivered: false, tag, reason: "webhook_not_configured" };
     } else {
-      const ld08Res = await dispatchGoogleChatLD08(
-        tag,
-        `EGM Goldfish [${mission.missionId}] (${mission.versionFolder}) : ${mission.manifestName} [${mission.branchPolicy}]`,
-      );
-      mission.ld08Notification = {
-        attempted: true,
-        delivered: ld08Res.delivered,
-        tag: ld08Res.tag,
-        status: ld08Res.status,
-      };
+      try {
+        const ld08Res = await dispatchGoogleChatLD08(
+          tag,
+          `EGM Goldfish [${mission.missionId}] (${mission.versionFolder}) : ${mission.manifestName} [${mission.branchPolicy}]`,
+        );
+        mission.ld08Notification = {
+          attempted: true,
+          delivered: ld08Res.delivered,
+          tag: ld08Res.tag,
+          status: ld08Res.status,
+        };
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : String(err);
+        mission.ld08Notification = { attempted: true, delivered: false, tag, reason };
+        if (input.requireLd08) {
+          requiredLd08Failure = err instanceof Error ? err : new Error(reason);
+        }
+      }
     }
   }
 
   const nextMissions = [mission, ...queue.missions.filter((item) => item.missionId !== missionId)];
   const savedQueuePath = writeGoldfishQueueFile(nextMissions);
+
+  if (requiredLd08Failure) {
+    throw requiredLd08Failure;
+  }
 
   return {
     ok: true,
@@ -508,15 +592,16 @@ export async function dispatchGoogleChatLD08(
   explicitWebhookUrl?: string,
 ): Promise<{ delivered: boolean; tag: string; status: number }> {
   const bridge = readSuperAgentBridgeConfig();
-  const webhookUrl = (
+  const rawUrl = (
     explicitWebhookUrl ||
     (typeof bridge.ld08WebhookUrl === "string" ? bridge.ld08WebhookUrl : "") ||
     process.env.GCHAT_LD08_WEBHOOK_URL ||
     ""
   ).trim();
-  if (!webhookUrl) {
+  if (!rawUrl) {
     throw new Error("Webhook Google Chat LD08 non configuré");
   }
+  const webhookUrl = validateGoogleChatWebhookUrl(rawUrl);
   const res = await fetch(webhookUrl, {
     method: "POST",
     headers: { "content-type": "application/json; charset=utf-8" },

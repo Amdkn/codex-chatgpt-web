@@ -712,7 +712,12 @@ function registerIpc({ logger, stateStore }) {
   });
   handle("launcher:superagent-save-config", (_event, patch) => {
     ensureSuperAgentProfile();
-    const saved = writeBridgeConfig(patch && typeof patch === "object" ? patch : {});
+    const safePatch = {};
+    if (patch && typeof patch === "object") {
+      if (typeof patch.ld08WebhookUrl === "string") safePatch.ld08WebhookUrl = patch.ld08WebhookUrl;
+      if (typeof patch.devAutoMergeEnabled === "boolean") safePatch.devAutoMergeEnabled = patch.devAutoMergeEnabled;
+    }
+    const saved = writeBridgeConfig(safePatch);
     return {
       saved: true,
       ld08WebhookConfigured: Boolean(saved.ld08WebhookUrl || process.env.GCHAT_LD08_WEBHOOK_URL),

@@ -43,11 +43,53 @@ function readBridgeConfig() {
   }
 }
 
+function atomicWriteFileSync(targetPath, content) {
+  const dir = path.dirname(targetPath);
+  fs.mkdirSync(dir, { recursive: true });
+  const tmpPath = path.join(dir, `.${path.basename(targetPath)}.tmp.${process.pid}.${Date.now()}`);
+  fs.writeFileSync(tmpPath, content, "utf8");
+  fs.renameSync(tmpPath, targetPath);
+}
+
+function validateGoogleChatWebhookUrl(rawUrl) {
+  const trimmed = String(rawUrl || "").trim();
+  if (!trimmed) throw new Error("Webhook Google Chat LD08 vide");
+  let parsed;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    throw new Error("URL Webhook Google Chat LD08 invalide");
+  }
+  const allowLoopbackTest = process.env.ASPACE_ALLOW_LOCALHOST_WEBHOOK_TEST === "1";
+  const isLoopback = parsed.hostname === "127.0.0.1" || parsed.hostname === "localhost" || parsed.hostname === "::1";
+  if (allowLoopbackTest && (parsed.protocol === "http:" || parsed.protocol === "https:") && isLoopback) {
+    return parsed.toString();
+  }
+  if (parsed.protocol !== "https:" || parsed.hostname.toLowerCase() !== "chat.googleapis.com") {
+    throw new Error("Webhook Google Chat LD08 doit utiliser HTTPS sur chat.googleapis.com");
+  }
+  return parsed.toString();
+}
+
 function writeBridgeConfig(patch) {
-  const stateDir = getSuperAgentStateDir();
-  fs.mkdirSync(stateDir, { recursive: true });
-  const next = { ...readBridgeConfig(), ...patch, updatedAt: new Date().toISOString() };
-  fs.writeFileSync(getBridgeConfigPath(), JSON.stringify(next, null, 2) + "\n", "utf8");
+  const safePatch = {};
+  if (patch && typeof patch === "object") {
+    if (typeof patch.ld08WebhookUrl === "string") {
+      const trimmed = patch.ld08WebhookUrl.trim();
+      safePatch.ld08WebhookUrl = trimmed ? validateGoogleChatWebhookUrl(trimmed) : "";
+    }
+    if (typeof patch.devAutoMergeEnabled === "boolean") {
+      safePatch.devAutoMergeEnabled = patch.devAutoMergeEnabled;
+    }
+    if (typeof patch.daemonPid === "number" || patch.daemonPid === null) {
+      safePatch.daemonPid = patch.daemonPid;
+    }
+    if (typeof patch.lastStartedAt === "string") {
+      safePatch.lastStartedAt = patch.lastStartedAt;
+    }
+  }
+  const next = { ...readBridgeConfig(), ...safePatch, updatedAt: new Date().toISOString() };
+  atomicWriteFileSync(getBridgeConfigPath(), JSON.stringify(next, null, 2) + "\n");
   return next;
 }
 
@@ -253,25 +295,83 @@ function postJsonHttps(urlString, payloadObj, timeoutMs = 4000) {
 
 async function notifyGoogleChatLD08(tag, message, explicitWebhookUrl) {
   const bridge = readBridgeConfig();
-  const webhookUrl = (explicitWebhookUrl || bridge.ld08WebhookUrl || process.env.GCHAT_LD08_WEBHOOK_URL || "").trim();
-  if (!webhookUrl) {
+  const rawUrl = (explicitWebhookUrl || bridge.ld08WebhookUrl || process.env.GCHAT_LD08_WEBHOOK_URL || "").trim();
+  if (!rawUrl) {
     throw new Error("Webhook Google Chat LD08 non configuré");
   }
+  const webhookUrl = validateGoogleChatWebhookUrl(rawUrl);
   const res = await postJsonHttps(webhookUrl, { text: `[${tag}] ${message}` });
   return { delivered: true, tag, ...res };
 }
 
-function triggerDevAutoMerge(prUrlOrBranch, repoPath) {
+function isProtectedNonDevBranch(ref) {
+  const cleaned = String(ref || "").trim();
+  if (!cleaned) return true;
+  if (/(^|[/:])(main|master|prod|production|release|staging)($|[/:]|[-_])/i.test(cleaned)) {
+    return true;
+  }
+  return !/^dev\//i.test(cleaned);
+}
+
+function inspectPrMetadata(target, repoPath) {
   return new Promise((resolve, reject) => {
-    const trimmed = String(prUrlOrBranch || "").trim();
-    if (!trimmed || /^(main|master|prod|production)$/i.test(trimmed)) {
-      reject(new Error("Auto-merge autorisé uniquement sur les branches/PR de Dev (Production isolée)"));
-      return;
-    }
     execFile(
       "gh",
-      ["pr", "merge", "--auto", "--squash", trimmed],
-      { cwd: repoPath || process.cwd(), timeout: 10_000, windowsHide: true },
+      ["pr", "view", target, "--json", "baseRefName,headRefName,isCrossRepository"],
+      {
+        cwd: repoPath || process.cwd(),
+        timeout: 8000,
+        windowsHide: true,
+        env: { ...process.env, DO_NOT_TRACK: "1" },
+      },
+      (err, stdout, stderr) => {
+        if (err) {
+          reject(new Error(stderr?.trim() || err.message));
+          return;
+        }
+        try {
+          resolve(JSON.parse(stdout));
+        } catch (parseErr) {
+          reject(parseErr);
+        }
+      },
+    );
+  });
+}
+
+async function triggerDevAutoMerge(prUrlOrBranch, repoPath) {
+  const bridge = readBridgeConfig();
+  if (bridge.devAutoMergeEnabled === false) {
+    throw new Error("Auto-merge Dev désactivé dans la configuration CPU");
+  }
+  const trimmed = String(prUrlOrBranch || "").trim();
+  if (!trimmed || trimmed.startsWith("-")) {
+    throw new Error("Cible Auto-Merge Dev invalide");
+  }
+  const looksLikePrRef = /^\d+$/.test(trimmed) || /\/pull\/\d+/i.test(trimmed);
+  if (looksLikePrRef) {
+    const meta = await inspectPrMetadata(trimmed, repoPath);
+    if (
+      meta?.isCrossRepository ||
+      isProtectedNonDevBranch(meta?.baseRefName) ||
+      /(^|[/:])(main|master|prod|production)/i.test(String(meta?.headRefName || ""))
+    ) {
+      throw new Error("Auto-merge strictement bloqué sur PR hors base dev/*, fork, ou source main/prod");
+    }
+  } else if (isProtectedNonDevBranch(trimmed)) {
+    throw new Error("Auto-merge autorisé uniquement sur les branches/PR de Dev (dev/*, Production isolée)");
+  }
+
+  return await new Promise((resolve, reject) => {
+    execFile(
+      "gh",
+      ["pr", "merge", "--auto", "--squash", "--", trimmed],
+      {
+        cwd: repoPath || process.cwd(),
+        timeout: 10_000,
+        windowsHide: true,
+        env: { ...process.env, DO_NOT_TRACK: "1" },
+      },
       (err, stdout, stderr) => {
         if (err) {
           reject(new Error(stderr?.trim() || err.message));
@@ -305,13 +405,10 @@ function readGoldfishQueueFile() {
 }
 
 function writeGoldfishQueueFile(missions) {
-  const stateDir = getSuperAgentStateDir();
   const queuePath = getGoldfishQueuePath();
-  fs.mkdirSync(stateDir, { recursive: true });
-  fs.writeFileSync(
+  atomicWriteFileSync(
     queuePath,
     JSON.stringify({ version: 1, updatedAt: new Date().toISOString(), missions: missions.slice(0, 50) }, null, 2) + "\n",
-    "utf8",
   );
   return queuePath;
 }
@@ -406,6 +503,9 @@ function tryFactoryIntake(aspaceRoot, mission) {
 }
 
 function tryGithubRepositoryDispatch(repo, mission, repoRoot) {
+  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(String(repo || ""))) {
+    return { attempted: false, dispatched: false, repo, error: "invalid_github_repo_slug" };
+  }
   const payload = JSON.stringify({
     event_type: "aspace_drive_manifest",
     client_payload: {
@@ -421,7 +521,14 @@ function tryGithubRepositoryDispatch(repo, mission, repoRoot) {
   const res = spawnSync(
     "gh",
     ["api", `repos/${repo}/dispatches`, "--method", "POST", "--input", "-"],
-    { cwd: repoRoot, input: payload, encoding: "utf8", timeout: 8000, windowsHide: true },
+    {
+      cwd: repoRoot,
+      input: payload,
+      encoding: "utf8",
+      timeout: 8000,
+      windowsHide: true,
+      env: { ...process.env, DO_NOT_TRACK: "1" },
+    },
   );
   if (res.error || res.status !== 0) {
     return {
@@ -465,7 +572,13 @@ async function dispatchDriveManifestToEgmGoldfish(input = {}) {
 
   const queue = readGoldfishQueueFile();
   const existing = queue.missions.find((item) => item.missionId === missionId);
-  if (existing && existing.checksumSha256 === checksumSha256 && !input.force && fs.existsSync(existing.contractPath)) {
+  if (
+    existing &&
+    existing.checksumSha256 === checksumSha256 &&
+    !input.force &&
+    path.resolve(existing.contractPath) === path.resolve(contractPath) &&
+    fs.existsSync(existing.contractPath)
+  ) {
     return {
       ok: true,
       deduplicated: true,
@@ -507,6 +620,7 @@ async function dispatchDriveManifestToEgmGoldfish(input = {}) {
     mission.githubDispatch = tryGithubRepositoryDispatch(repo, mission, repoRoot);
   }
 
+  let requiredLd08Failure = null;
   if (input.notifyLd08 || input.requireLd08) {
     const tag = String(input.tag || "person/delivery").trim() || "person/delivery";
     const bridge = readBridgeConfig();
@@ -514,21 +628,33 @@ async function dispatchDriveManifestToEgmGoldfish(input = {}) {
     if (!hasWebhook && !input.requireLd08) {
       mission.ld08Notification = { attempted: false, delivered: false, tag, reason: "webhook_not_configured" };
     } else {
-      const ld08Res = await notifyGoogleChatLD08(
-        tag,
-        `EGM Goldfish [${mission.missionId}] (${mission.versionFolder}) : ${mission.manifestName} [${mission.branchPolicy}]`,
-      );
-      mission.ld08Notification = {
-        attempted: true,
-        delivered: ld08Res.delivered,
-        tag: ld08Res.tag,
-        status: ld08Res.status,
-      };
+      try {
+        const ld08Res = await notifyGoogleChatLD08(
+          tag,
+          `EGM Goldfish [${mission.missionId}] (${mission.versionFolder}) : ${mission.manifestName} [${mission.branchPolicy}]`,
+        );
+        mission.ld08Notification = {
+          attempted: true,
+          delivered: ld08Res.delivered,
+          tag: ld08Res.tag,
+          status: ld08Res.status,
+        };
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : String(err);
+        mission.ld08Notification = { attempted: true, delivered: false, tag, reason };
+        if (input.requireLd08) {
+          requiredLd08Failure = err instanceof Error ? err : new Error(reason);
+        }
+      }
     }
   }
 
   const nextMissions = [mission, ...queue.missions.filter((item) => item.missionId !== missionId)];
   const savedQueuePath = writeGoldfishQueueFile(nextMissions);
+
+  if (requiredLd08Failure) {
+    throw requiredLd08Failure;
+  }
 
   return {
     ok: true,
@@ -556,5 +682,6 @@ module.exports = {
   readBridgeConfig,
   startSuperAgentDaemon,
   triggerDevAutoMerge,
+  validateGoogleChatWebhookUrl,
   writeBridgeConfig,
 };

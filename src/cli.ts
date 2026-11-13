@@ -111,6 +111,15 @@ function takeOption(args: string[], name: string): string | undefined {
   return value;
 }
 
+function takeRawOption(args: string[], name: string): string | undefined {
+  const index = args.indexOf(name);
+  if (index < 0) return undefined;
+  if (index + 1 >= args.length) throw new Error(`${name} requires a value`);
+  const value = args[index + 1]!;
+  args.splice(index, 2);
+  return value;
+}
+
 function takeFlag(args: string[], name: string): boolean {
   const index = args.indexOf(name);
   if (index < 0) return false;
@@ -652,15 +661,17 @@ async function main(): Promise<void> {
       const port = portRaw ? Number(portRaw) : 17841;
       stdout.write(`${JSON.stringify(exportCliHarnessConfig(harness, port), null, 2)}\n`);
     } else if (action === "dispatch-manifest") {
-      const manifestName = takeOption(args, "--name")?.trim() ?? "";
-      const manifestId = takeOption(args, "--id");
-      const versionFolder = takeOption(args, "--folder");
-      const manifestUrl = takeOption(args, "--url");
-      const excerpt = takeOption(args, "--excerpt");
-      const source = takeOption(args, "--source") ?? "cli";
-      const outDir = takeOption(args, "--out");
-      const repo = takeOption(args, "--repo");
-      const tag = takeOption(args, "--tag");
+      const manifestName = takeRawOption(args, "--name")?.trim() ?? "";
+      const manifestId = takeRawOption(args, "--id");
+      const versionFolder = takeRawOption(args, "--folder");
+      const manifestUrl = takeRawOption(args, "--url");
+      const excerptRaw = takeRawOption(args, "--excerpt");
+      const excerptB64 = takeRawOption(args, "--excerpt-b64");
+      const excerpt = excerptB64 ? Buffer.from(excerptB64, "base64").toString("utf8") : excerptRaw;
+      const source = takeRawOption(args, "--source") ?? "cli";
+      const outDir = takeRawOption(args, "--out");
+      const repo = takeRawOption(args, "--repo");
+      const tag = takeRawOption(args, "--tag");
       const notifyLd08 = takeFlag(args, "--notify-ld08");
       const triggerGithubDispatch = takeFlag(args, "--github-dispatch");
       const skipFactoryIntake = takeFlag(args, "--skip-factory-intake");
@@ -672,14 +683,14 @@ async function main(): Promise<void> {
       }
       const result = await dispatchDriveManifestToEgmGoldfish({
         manifestName,
-        manifestId,
-        versionFolder,
-        manifestUrl,
-        excerpt,
-        source,
-        outDir,
-        repo,
-        tag,
+        manifestId: manifestId?.trim() || undefined,
+        versionFolder: versionFolder?.trim() || undefined,
+        manifestUrl: manifestUrl?.trim() || undefined,
+        excerpt: excerpt?.trim() || undefined,
+        source: source.trim() || undefined,
+        outDir: outDir?.trim() || undefined,
+        repo: repo?.trim() || undefined,
+        tag: tag?.trim() || undefined,
         notifyLd08,
         triggerGithubDispatch,
         skipFactoryIntake,
