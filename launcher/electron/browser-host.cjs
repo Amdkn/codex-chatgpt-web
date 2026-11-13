@@ -1,7 +1,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { createHash, randomBytes } = require("node:crypto");
-const { clipboard, WebContentsView, powerMonitor, powerSaveBlocker, shell } = require("electron");
+const { clipboard, screen, WebContentsView, powerMonitor, powerSaveBlocker, shell } = require("electron");
 const { writePrivateFileAtomic } = require("./atomic-file.cjs");
 const {
   runBrowserHelperOperation,
@@ -31,6 +31,18 @@ const {
   ASPACE_DOM_TELEMETRY_SHIELD_SCRIPT,
   installAspaceTelemetryShield,
 } = require("./aspace-telemetry-shield.cjs");
+const {
+  closeEmbeddedChrome,
+  focusEmbeddedChrome,
+  getNativeWindowHandleDecimal,
+  isEmbeddedChromeAlive,
+  onEmbeddedChromeClosed,
+  openPlatformInLocalChrome,
+  resolveLocalChromeCdpPort,
+  resolvePreferredCdpEndpoint,
+  shutdownEmbedDaemon,
+  syncEmbeddedChromeBounds,
+} = require("./aspace-local-chrome.cjs");
 
 const NEW_CHAT_URL = "https://chatgpt.com/";
 const CHATGPT_ORIGIN = "https://chatgpt.com";
@@ -374,6 +386,14 @@ class BrowserHost {
     this.visible = false;
     this.surfaceActive = true;
     this.turnTabs = new Map();
+    this.unsubscribeEmbeddedChromeClosed = onEmbeddedChromeClosed((closedHwndDec) => {
+      if (this.destroyed) return;
+      for (const tab of [...this.turnTabs.values()]) {
+        if (tab.isEmbeddedChrome && tab.chromeHwnd === closedHwndDec) {
+          this.removeTurnTab(tab, false);
+        }
+      }
+    });
     this.closedTurnOwners = new Map();
     this.userCancelledTurnOwners = new Map();
     this.manualTerminalSignals = new Map();
@@ -553,6 +573,7 @@ class BrowserHost {
       loading: tab.loading === true,
       active: this.selectedTabId === tab.id,
       closable: true,
+      ...(tab.isEmbeddedChrome ? { isEmbeddedChrome: true } : {}),
       ...(tab.status === "running" && tab.authenticationRequired ? { authenticationRequired: true } : {}),
       ...(tab.status === "running" && !tab.authenticationRequired && tab.activity
         ? { activity: { ...tab.activity } } : {}),
@@ -964,7 +985,7 @@ class BrowserHost {
   async configureAnnouncementDismissal(enabled) {
     if (enabled) requireAutomaticBrowserInspection(this, "ChatGPT announcement dismissal");
     const views = [this.view, ...[...this.turnTabs.values()]
-      .filter(tab => tab.interactionMode === "automatic")
+      .filter(tab => tab.interactionMode === "automatic" && tab.view)
       .map(tab => tab.view)];
     await Promise.all(views.map(view => {
       const contents = view?.webContents;
@@ -1476,8 +1497,8 @@ class BrowserHost {
   }
 
   snapshot() {
-    const contents = this.activeView()?.webContents;
     const selected = this.selectedTurnTab();
+    const contents = selected?.isEmbeddedChrome ? null : this.activeView()?.webContents;
     const manualInteraction = browserInteractionModeFor(this) === "manual";
     const homeTab = {
       id: "home",
@@ -1706,6 +1727,20 @@ class BrowserHost {
     }
   }
 
+  chromeScaleFactor() {
+    try {
+      if (
+        typeof screen !== "undefined"
+        && screen
+        && typeof screen.getDisplayMatching === "function"
+        && typeof this.window?.getBounds === "function"
+      ) {
+        return screen.getDisplayMatching(this.window.getBounds())?.scaleFactor || 1;
+      }
+    } catch {}
+    return 1;
+  }
+
   activeView() {
     return this.authView || this.selectedTurnTab()?.view || this.view;
   }
@@ -1742,7 +1777,11 @@ class BrowserHost {
   }
 
   presentTurnView(tab, visible) {
-    if (tab.interactionMode === "manual") {
+    if (tab.isEmbeddedChrome) {
+      void syncEmbeddedChromeBounds(tab.chromeHwnd, this.bounds, visible, this.chromeScaleFactor());
+      return;
+    }
+    if (tab.interactionMode === "manual" || tab.isPlatformTab) {
       tab.view.setBounds(visible ? this.bounds : this.hiddenTurnBounds());
       tab.view.setVisible(visible || tab.status === "running");
       return;
@@ -1817,9 +1856,156 @@ class BrowserHost {
     if (this.authView) this.closeAuthView(this.authView, true);
     this.selectedTabId = tabId;
     this.syncViewVisibility();
-    if (this.visible && this.surfaceActive) this.activeView().webContents.focus();
+    const selected = this.selectedTurnTab();
+    if (this.visible && this.surfaceActive) {
+      if (selected?.isEmbeddedChrome) {
+        void focusEmbeddedChrome(selected.chromeHwnd);
+      } else {
+        this.activeView()?.webContents?.focus();
+      }
+    }
     this.publishState?.(this.snapshot());
     this.writeDescriptor();
+    return this.snapshot();
+  }
+
+  async openPlatformTab(provider) {
+    if (!provider || typeof provider.newChatUrl !== "string") {
+      throw new Error("Invalid platform provider");
+    }
+    const id = `platform:${provider.id}`;
+    const existing = this.turnTabs.get(id);
+    if (existing) {
+      if (!existing.isEmbeddedChrome || (await isEmbeddedChromeAlive(existing.chromeHwnd))) {
+        this.selectTab(id);
+        this.show?.();
+        return this.snapshot();
+      }
+      this.turnTabs.delete(id);
+    }
+    if (process.env.ASPACE_PREFER_LOCAL_CHROME !== "0") {
+      const parentHwndDec = getNativeWindowHandleDecimal(this.window);
+      const scaleFactor = this.chromeScaleFactor();
+      const localResult = await openPlatformInLocalChrome(provider.newChatUrl, {
+        cdpPort: resolveLocalChromeCdpPort(),
+        parentHwndDec,
+        bounds: this.bounds,
+        scaleFactor,
+        logger: this.logger,
+      });
+      this.localChromeStatus = localResult.probe;
+      if (localResult.mode === "embedded-local-chrome" && localResult.chromeHwnd) {
+        const tab = {
+          id,
+          traceId: `aspace-${provider.id}`,
+          conversationKey: undefined,
+          connectorIdentity: undefined,
+          connectorBound: false,
+          helperPid: process.pid,
+          view: null,
+          status: "ready",
+          isPlatformTab: true,
+          isEmbeddedChrome: true,
+          chromeHwnd: localResult.chromeHwnd,
+          ordinal: 100 + this.turnTabs.size,
+          label: `${provider.name} (Chrome)`,
+          pageTitle: provider.name,
+          url: provider.newChatUrl,
+          loading: false,
+          message: `${provider.name} embarqué (Chrome local authentifié)`,
+          interactionMode: "automatic",
+          initializingSurface: false,
+          bootstrapReady: true,
+          rendererReady: false,
+          deviceEmulationViewport: null,
+          deviceEmulationDirty: false,
+          bootstrapDeadlineAt: Date.now() + 60_000,
+          lastHeartbeatAt: Date.now(),
+        };
+        this.turnTabs.set(id, tab);
+        this.selectedTabId = id;
+        this.show?.();
+        this.syncViewVisibility();
+        this.writeDescriptor();
+        this.publishState?.(this.snapshot());
+        this.logger.info("browser.platform_tab_embedded", {
+          provider: provider.id,
+          mode: localResult.mode,
+          chromeHwnd: localResult.chromeHwnd,
+          hostHwnd: localResult.hostHwnd ?? null,
+          insets: localResult.insets ?? null,
+          bounds: this.bounds,
+          scaleFactor,
+        });
+        return { ...this.snapshot(), localChromeAction: localResult };
+      }
+      if (localResult.handled) {
+        this.writeDescriptor();
+        this.publishState?.(this.snapshot());
+        return { ...this.snapshot(), localChromeAction: localResult };
+      }
+    }
+    const view = new WebContentsView({
+      webPreferences: {
+        partition: this.partition,
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true,
+        spellcheck: true,
+        backgroundThrottling: false,
+      },
+    });
+    const tab = {
+      id,
+      traceId: `aspace-${provider.id}`,
+      conversationKey: undefined,
+      connectorIdentity: undefined,
+      connectorBound: false,
+      helperPid: process.pid,
+      view,
+      status: "ready",
+      isPlatformTab: true,
+      ordinal: 100 + this.turnTabs.size,
+      label: provider.name,
+      pageTitle: provider.name,
+      url: provider.newChatUrl,
+      loading: true,
+      message: `${provider.name} ready`,
+      interactionMode: "automatic",
+      initializingSurface: false,
+      bootstrapReady: true,
+      rendererReady: false,
+      deviceEmulationViewport: null,
+      deviceEmulationDirty: false,
+      bootstrapDeadlineAt: Date.now() + 60_000,
+      lastHeartbeatAt: Date.now(),
+    };
+    this.turnTabs.set(id, tab);
+    try { this.window.contentView.addChildView(view); } catch {}
+    const contents = view.webContents;
+    contents.on("did-start-loading", () => {
+      tab.loading = true;
+      this.publishState?.(this.snapshot());
+    });
+    contents.on("did-stop-loading", () => {
+      tab.loading = false;
+      tab.url = contents.getURL();
+      this.publishState?.(this.snapshot());
+    });
+    contents.on("page-title-updated", (_event, title) => {
+      if (title && title.trim()) tab.label = title.trim();
+      this.publishState?.(this.snapshot());
+    });
+    this.selectedTabId = id;
+    this.show?.();
+    this.syncViewVisibility();
+    this.publishState?.(this.snapshot());
+    void contents.loadURL(provider.newChatUrl).catch((error) => {
+      this.logger.warn("browser.platform_tab_load_failed", {
+        provider: provider.id,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
     return this.snapshot();
   }
 
@@ -1844,9 +2030,13 @@ class BrowserHost {
       this.closedTurnOwners.set(tab.traceId, tab.helperPid);
       tab.status = "aborted";
     }
-    try { this.window.contentView.removeChildView(tab.view); } catch {}
-    const contents = tab.view.webContents;
-    if (contents && !contents.isDestroyed()) contents.close();
+    if (tab.isEmbeddedChrome) {
+      void closeEmbeddedChrome(tab.chromeHwnd);
+    } else if (tab.view) {
+      try { this.window.contentView.removeChildView(tab.view); } catch {}
+      const contents = tab.view.webContents;
+      if (contents && !contents.isDestroyed()) contents.close();
+    }
     if (this.selectedTabId === tab.id) {
       this.selectedTabId = [...this.turnTabs.keys()].at(-1) || "home";
       const homeContents = this.view?.webContents;
@@ -2087,7 +2277,9 @@ class BrowserHost {
     this.visible = true;
     this.syncViewVisibility();
     this.setState({ visible: true });
-    if (this.surfaceActive && this.boundsReady) this.activeView().webContents.focus();
+    if (this.surfaceActive && this.boundsReady && !this.selectedTurnTab()?.isEmbeddedChrome) {
+      this.activeView()?.webContents?.focus();
+    }
   }
 
   async reveal(inspectSession = true) {
@@ -2130,6 +2322,9 @@ class BrowserHost {
     }
     if (this.manualOperation) {
       throw new Error(`Browser navigation is locked during ${this.manualOperation}`);
+    }
+    if (this.selectedTurnTab()?.isEmbeddedChrome) {
+      return this.snapshot();
     }
     const contents = this.activeView().webContents;
     navigateBrowser(contents, action);
@@ -3258,7 +3453,7 @@ class BrowserHost {
     const surfaceTargets = {};
     if (browserInteractionModeFor(this) === "automatic") {
       const surfaces = [[this.surfaceId, this.view?.webContents],
-        ...[...this.turnTabs.values()].filter(tab => tab.interactionMode === "automatic")
+        ...[...this.turnTabs.values()].filter(tab => tab.interactionMode === "automatic" && tab.view)
           .map(tab => [tab.surfaceId, tab.view.webContents])];
       for (const [surfaceId, contents] of surfaces) {
         if (!contents || contents.isDestroyed()) continue;
@@ -3272,6 +3467,9 @@ class BrowserHost {
       profile: this.profile,
       pid: process.pid,
       endpoint: `http://127.0.0.1:${this.cdpPort}`,
+      preferredCdpPort: this.localChromeStatus?.available ? this.localChromeStatus.cdpPort : this.cdpPort,
+      preferredCdpEndpoint: this.localChromeStatus?.available ? this.localChromeStatus.endpoint : `http://127.0.0.1:${this.cdpPort}`,
+      localChrome: this.localChromeStatus ?? null,
       control: this.control,
       helper: this.helper,
       partition: this.partition,
@@ -3281,6 +3479,13 @@ class BrowserHost {
       createdAt: new Date().toISOString(),
     };
     writePrivateFileAtomic(this.descriptorPath, `${JSON.stringify(descriptor, null, 2)}\n`);
+  }
+
+  async probeLocalChrome() {
+    const resolved = await resolvePreferredCdpEndpoint(this.cdpPort);
+    this.localChromeStatus = resolved.mode === "local-chrome" ? { available: true, ...resolved } : { available: false, cdpPort: resolveLocalChromeCdpPort(), endpoint: resolved.endpoint };
+    this.writeDescriptor();
+    return resolved;
   }
 
   async persistSession() {
@@ -3328,11 +3533,18 @@ class BrowserHost {
         for (const resolve of tab.manualTerminalWaiters || []) resolve({ status: "cancelled" });
         tab.manualTerminalWaiters?.clear();
       }
-      try { this.window.contentView.removeChildView(tab.view); } catch {}
-      const contents = tab.view.webContents;
-      if (contents && !contents.isDestroyed()) contents.close();
+      if (tab.isEmbeddedChrome) {
+        void closeEmbeddedChrome(tab.chromeHwnd);
+      } else if (tab.view) {
+        try { this.window.contentView.removeChildView(tab.view); } catch {}
+        const contents = tab.view.webContents;
+        if (contents && !contents.isDestroyed()) contents.close();
+      }
     }
     this.turnTabs.clear();
+    this.unsubscribeEmbeddedChromeClosed?.();
+    this.unsubscribeEmbeddedChromeClosed = null;
+    shutdownEmbedDaemon();
     if (this.view && !this.view.webContents.isDestroyed()) this.view.webContents.close();
   }
 }

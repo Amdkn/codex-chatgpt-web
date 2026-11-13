@@ -188,7 +188,7 @@ test("all locales translate known doctor success checks without changing literal
     assert.equal(localizeRuntimeMessage(copy, "Unexpected connector diagnostic", "connector", language), "Unexpected connector diagnostic");
   }
   assert.equal(copyFor("ko").install, "모델 설치");
-  assert.equal(copyFor("zh-TW").install, "安裝模型");
+  assert.equal(copyFor("fr").install, "Installer les modèles");
 });
 
 

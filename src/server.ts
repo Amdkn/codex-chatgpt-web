@@ -51,6 +51,22 @@ import { expandPreviousResponseInput, flushResponseState, rememberResponseState 
 import { namespacedToolName, type AdapterEvent, type CodexParsedRequest } from "./types";
 import type { CodexProviderConfig } from "./types";
 import type { ProviderAdapter } from "./adapters/base";
+import {
+  collectPalierReadiness,
+  formatResponsesJsonAsAnthropicMessage,
+  formatResponsesJsonAsChatCompletions,
+  normalizeAnthropicMessagesToResponsesRequest,
+  normalizeChatCompletionsToResponsesRequest,
+} from "./adapters/aspace-palier-orchestrator";
+import {
+  callSuperAgentOrchestrator,
+  collectSuperAgentStatus,
+  dispatchDriveManifestToEgmGoldfish,
+  dispatchGoogleChatLD08,
+  ensureSuperAgentProfileProvisioned,
+  listEgmGoldfishMissions,
+  writeSuperAgentBridgeConfig,
+} from "./adapters/aspace-superagent-bridge";
 import { VERSION } from "./version";
 
 type HttpTrackedEndpoint = "models" | "responses" | "compact" | "search" | "unspecified" | NativeImageEndpoint;
@@ -1284,6 +1300,97 @@ export function startServer(
           req.signal,
           process.platform,
           endpoint,
+        );
+      }
+      if (req.method === "GET" && url.pathname === "/v1/aspace/paliers") {
+        return Response.json(collectPalierReadiness());
+      }
+      if (req.method === "GET" && url.pathname === "/v1/aspace/superagent/state") {
+        return Response.json(await collectSuperAgentStatus());
+      }
+      if (req.method === "POST" && url.pathname === "/v1/aspace/superagent/pause") {
+        const body = (await readJsonRequestBody(req)) as Record<string, unknown>;
+        await callSuperAgentOrchestrator("POST", "executor/pause", { paused: body.paused === true });
+        return Response.json(await collectSuperAgentStatus());
+      }
+      if (req.method === "POST" && url.pathname === "/v1/aspace/superagent/ld08-webhook") {
+        const body = (await readJsonRequestBody(req)) as Record<string, unknown>;
+        ensureSuperAgentProfileProvisioned();
+        const saved = writeSuperAgentBridgeConfig({
+          ...(typeof body.webhookUrl === "string" ? { ld08WebhookUrl: body.webhookUrl.trim() } : {}),
+          ...(typeof body.devAutoMergeEnabled === "boolean" ? { devAutoMergeEnabled: body.devAutoMergeEnabled } : {}),
+        });
+        return Response.json({ ok: true, bridge: saved });
+      }
+      if (req.method === "POST" && url.pathname === "/v1/aspace/superagent/notify-ld08") {
+        const body = (await readJsonRequestBody(req)) as Record<string, unknown>;
+        const tag = typeof body.tag === "string" && body.tag.trim() ? body.tag.trim() : "person/delivery";
+        const message = typeof body.message === "string" && body.message.trim()
+          ? body.message.trim()
+          : "Signal CPU — CLI-Plateformes-Unifié SuperAgent LD08";
+        const webhookUrl = typeof body.webhookUrl === "string" ? body.webhookUrl.trim() : undefined;
+        return Response.json(await dispatchGoogleChatLD08(tag, message, webhookUrl));
+      }
+      if (req.method === "GET" && url.pathname === "/v1/aspace/egm/missions") {
+        return Response.json(listEgmGoldfishMissions());
+      }
+      if (req.method === "POST" && url.pathname === "/v1/aspace/egm/dispatch") {
+        const body = (await readJsonRequestBody(req)) as Record<string, unknown>;
+        const manifestName = typeof body.manifestName === "string" ? body.manifestName.trim() : "";
+        if (!manifestName) {
+          return formatErrorResponse(400, "invalid_request_error", "manifestName is required");
+        }
+        const result = await dispatchDriveManifestToEgmGoldfish({
+          manifestName,
+          manifestId: typeof body.manifestId === "string" ? body.manifestId : undefined,
+          versionFolder: typeof body.versionFolder === "string" ? body.versionFolder : undefined,
+          manifestUrl: typeof body.manifestUrl === "string" ? body.manifestUrl : undefined,
+          excerpt: typeof body.excerpt === "string" ? body.excerpt : undefined,
+          source: typeof body.source === "string" ? body.source : undefined,
+          outDir: typeof body.outDir === "string" ? body.outDir : undefined,
+          repo: typeof body.repo === "string" ? body.repo : undefined,
+          notifyLd08: body.notifyLd08 === true,
+          requireLd08: body.requireLd08 === true,
+          triggerGithubDispatch: body.triggerGithubDispatch === true,
+          skipFactoryIntake: body.skipFactoryIntake === true,
+          force: body.force === true,
+          tag: typeof body.tag === "string" ? body.tag : undefined,
+        });
+        return Response.json(result);
+      }
+      if (req.method === "POST" && (url.pathname === "/v1/chat/completions" || url.pathname === "/v1/messages")) {
+        if (draining) return formatErrorResponse(503, "server_error", "codex-chatgpt-web is draining for a requested service operation");
+        const isAnthropic = url.pathname === "/v1/messages";
+        return httpTurns.track(
+          async (signal, bindIdentity) => {
+            const rawBody = (await readJsonRequestBody(req)) as Record<string, unknown>;
+            const normalized = isAnthropic
+              ? normalizeAnthropicMessagesToResponsesRequest(rawBody)
+              : normalizeChatCompletionsToResponsesRequest(rawBody);
+            const syntheticReq = new Request(new URL("/v1/responses", req.url), {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify(normalized),
+              signal,
+            });
+            const upstream = await responseRequest(
+              syntheticReq,
+              config,
+              dependencies.adapterFactory,
+              { onTurnIdentity: bindIdentity },
+            );
+            if (!upstream.ok || normalized.stream) return upstream;
+            const json = await upstream.json() as Record<string, unknown>;
+            const model = typeof normalized.model === "string" ? normalized.model : "gpt-5.4";
+            return Response.json(
+              isAnthropic
+                ? formatResponsesJsonAsAnthropicMessage(json, model)
+                : formatResponsesJsonAsChatCompletions(json, model),
+            );
+          },
+          req.signal,
+          process.platform,
+          "responses",
         );
       }
       return new Response("Not found", { status: 404 });

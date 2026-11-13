@@ -1054,7 +1054,24 @@ class RuntimeHost {
     }
   }
 
-  async setupCore() {
+  preferenceCliArgs(preferences, { mode = "browser-only", interactionMode = "automatic", development = false } = {}) {
+    if (!preferences || typeof preferences !== "object") return [];
+    const args = [];
+    if (interactionMode !== "manual" && preferences.experimentalBiggerContext === true) args.push("--bigger-context");
+    if (preferences.composerPredictionsEnabled === false) args.push("--no-composer-predictions");
+    if (interactionMode !== "manual" && preferences.experimentalSkillAttachments === true) args.push("--skill-attachments");
+    if (interactionMode !== "manual" && preferences.experimentalFreshConversationPerTurn === true) args.push("--fresh-conversation");
+    if (preferences.useTemporaryChats === false) args.push("--ordinary-chats");
+    if (!development && interactionMode !== "manual" && preferences.autoApproveToolCalls === true) {
+      args.push("--auto-approve-tool-calls");
+    }
+    if (interactionMode === "manual" && mode === "full" && preferences.zeroRiskProEnabled === true) {
+      args.push("--zero-risk-pro");
+    }
+    return args;
+  }
+
+  async setupCore(preferences = null) {
     this.assertProductionProfile("Codex integration setup");
     if (this.currentOperation()) throw new Error(`Another launcher operation is active: ${this.currentOperation()}`);
     const existing = this.runtimeConfigSnapshot();
@@ -1077,6 +1094,7 @@ class RuntimeHost {
       "--replace-codex-route",
       "--acknowledge-unofficial",
       "--restart-service",
+      ...(existing.configured ? [] : this.preferenceCliArgs(preferences, { mode, interactionMode })),
     ];
     const result = await this.runSetup("core-setup", args, {
       message: "Installing ChatGPT Web models into Codex",
@@ -1086,7 +1104,7 @@ class RuntimeHost {
     return { ...result, mode };
   }
 
-  async setupDevCore() {
+  async setupDevCore(preferences = null) {
     if (this.launcherProfile !== "development") {
       throw new Error("DEV profile setup requires the isolated DEV launcher");
     }
@@ -1107,6 +1125,7 @@ class RuntimeHost {
         refreshCapabilities: interactionMode === "automatic",
       }),
       "--acknowledge-unofficial",
+      ...(existing.configured ? [] : this.preferenceCliArgs(preferences, { mode, interactionMode, development: true })),
     ];
     const result = await this.runDevSetup("dev-profile-setup", args, {
       message: "Configuring the isolated DEV harness",
@@ -1407,7 +1426,7 @@ class RuntimeHost {
     };
   }
 
-  setupMcp({ tunnelId = "", runtimeKey = "", replace = false, interactionMode } = {}, afterRuntimeReady) {
+  setupMcp({ tunnelId = "", runtimeKey = "", replace = false, interactionMode, preferences = null } = {}, afterRuntimeReady) {
     this.assertProductionProfile("Native Codex MCP setup");
     if (this.currentOperation()) throw new Error(`Another launcher operation is active: ${this.currentOperation()}`);
     const targetMode = interactionMode ?? this.browserInteractionMode();
@@ -1424,6 +1443,7 @@ class RuntimeHost {
       "--browser-host-descriptor",
       this.browserDescriptorPath,
       ...this.browserInteractionArgs({ mode: targetMode }),
+      ...this.preferenceCliArgs(preferences, { mode: "full", interactionMode: targetMode }),
       "--replace-codex-route",
     ];
     if (reuseSavedCredentials) {
@@ -1456,7 +1476,7 @@ class RuntimeHost {
     }).finally(() => fs.rmSync(keyPath, { force: true }));
   }
 
-  setupDevMcp({ tunnelId = "", runtimeKey = "", replace = false, interactionMode } = {}, afterRuntimeReady) {
+  setupDevMcp({ tunnelId = "", runtimeKey = "", replace = false, interactionMode, preferences = null } = {}, afterRuntimeReady) {
     if (this.launcherProfile !== "development") {
       throw new Error("DEV MCP setup requires the isolated DEV launcher");
     }
@@ -1476,6 +1496,7 @@ class RuntimeHost {
       "--browser-host-descriptor",
       this.browserDescriptorPath,
       ...this.browserInteractionArgs({ mode: targetMode }),
+      ...this.preferenceCliArgs(preferences, { mode: "full", interactionMode: targetMode, development: true }),
       "--acknowledge-unofficial",
     ];
     if (reuseSavedCredentials) {

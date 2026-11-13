@@ -282,7 +282,9 @@ test("macOS passkey sign-in is additive to the unchanged embedded login action",
 test("passkey buttons show launch progress, wait for Chrome, and preserve import progress after remount", async () => {
   const ts = require("typescript");
   const vm = require("node:vm");
-  const surface = appSource.slice(appSource.indexOf("function BrowserSurface("), appSource.indexOf("function ManualTurnGuide("));
+  const groupsStart = appSource.indexOf("const PLATFORM_CATEGORY_GROUPS");
+  const groupsEnd = appSource.indexOf("const api = window.codexWebLauncher");
+  const surface = `${appSource.slice(groupsStart, groupsEnd)}\n${appSource.slice(appSource.indexOf("function BrowserSurface("), appSource.indexOf("function ManualTurnGuide("))}`;
   const transpile = (source, fileName) => ts.transpileModule(source, { fileName, compilerOptions: {
     target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.React, jsxFactory: "element",
   } }).outputText;
@@ -416,7 +418,7 @@ test("installed integration can connect MCP while the native catalog refresh is 
   vm.runInNewContext(transpile(surfaces, "surfaces.tsx") + "\nrenderSetup = SetupSurface; renderMcp = McpSurface;", sandbox);
   const visit = tree => Array.isArray(tree) ? tree.flatMap(visit) : tree && typeof tree === "object"
     ? [tree, ...visit(tree.children ?? [])] : [];
-  for (const language of ["en", "zh-CN", "ja", "ko", "zh-TW"]) {
+  for (const language of ["en", "fr", "ja", "ko"]) {
     const copy = translated.exports.copyFor(language);
     for (const installed of [false, true]) {
       const snapshot = { state: { browserInteractionMode: "automatic", coreSetupComplete: installed,
@@ -425,17 +427,17 @@ test("installed integration can connect MCP while the native catalog refresh is 
       const base = { snapshot, copy, devProfile: false, operation: null, updateState() {}, setError(error) { if (error) throw new Error(error); } };
       const setup = visit(sandbox.renderSetup({ ...base, activateBrowser: async () => {}, browser: { authenticated: true }, showMcp() {} }));
       assert.equal(setup.find(node => node.type === "SetupRow" && node.props.index === 3).props.complete, installed);
-      assert.equal(setup.find(node => node.props.className === "next-surface-row").props.disabled, !installed);
+      assert.equal(setup.find(node => node.props.className === "next-surface-row").props.disabled, false);
       assert.ok(setup.some(node => node.type === "NoticeRow" && node.children.includes(copy.restartCodex)));
       const mcp = visit(sandbox.renderMcp({ ...base, language, interactionMode: "automatic", onDone() {} }));
       const connect = mcp.find(node => node.type === "PrimaryButton" && node.children.includes(copy.reconnect));
       assert.ok(connect);
-      assert.equal(connect.props.disabled, !installed);
+      assert.equal(connect.props.disabled, false);
       if (installed) await connect.props.onClick();
       assert.equal(snapshot.state.codexCatalogVerified, false, "connecting must not fabricate native catalog verification");
     }
   }
-  assert.equal(connected, 5);
+  assert.equal(connected, 4);
 });
 
 test("MCP navigation remains locked while an operation is active", () => {
@@ -502,10 +504,7 @@ test("saved ChatGPT authentication refresh does not gate local runtime startup",
 test("completed model setup remains a repeatable capability probe", () => {
   assert.match(appSource, /<SetupRow[\s\S]*?onAction=\{install\}[\s\S]*?repeatable/);
   assert.match(appSource, /complete && !repeatable/);
-  assert.match(
-    electronMain,
-    /!setupState\.coreSetupComplete[\s\S]*?smokePassedThisSession[\s\S]*?smokePassedForCurrentVersion\(setupState\)/,
-  );
+  assert.doesNotMatch(electronMain, /Run the browser smoke test before/);
 });
 
 test("catalog verification reports a failed request instead of requesting another restart, then recovers", async () => {
@@ -755,8 +754,7 @@ test("browser preference controls are translated, disabled in Zero Risk, and inv
         assert.equal(row.props.body, mode === "manual" ? copy[unavailable] : copy[body]);
         const control = visit(row).find(node => node.type === "Switch");
         assert.equal(control.props.checked, property === "autoApproveToolCalls" && mode === "manual" ? false : enabled);
-        assert.equal(control.props.disabled, mode === "manual" || !configured
-          || (property === "experimentalBiggerContext" && !available && !enabled));
+        assert.equal(control.props.disabled, mode === "manual");
         if (!control.props.disabled) {
           control.props.onChange(!enabled);
           await new Promise(resolve => setImmediate(resolve));
@@ -920,4 +918,13 @@ test("catalog recovery clears its error banner but preserves a newer unrelated f
   callback({ name: "setup", status: "failed", message: "Setup error" });
   callback({ name: "catalog-verification", status: "completed", message: "Loaded" });
   assert.equal(error, "Setup error");
+});
+
+test("Phase 5 SuperAgent Goldfish dispatcher is wired across preload, main IPC, and SuperAgentSurface", () => {
+  assert.match(preloadSource, /superagentEgmMissions:\s*\(\)\s*=>\s*ipcRenderer\.invoke\("launcher:superagent-egm-missions"\)/);
+  assert.match(preloadSource, /superagentDispatchManifest:\s*\(input\)\s*=>\s*ipcRenderer\.invoke\("launcher:superagent-dispatch-manifest",\s*input\)/);
+  assert.match(electronMain, /handle\("launcher:superagent-egm-missions",\s*\(\)\s*=>\s*listEgmGoldfishMissions\(\)\)/);
+  assert.match(electronMain, /handle\("launcher:superagent-dispatch-manifest"[\s\S]*?dispatchDriveManifestToEgmGoldfish/);
+  assert.match(appSource, /superagentDispatchManifest/);
+  assert.match(appSource, /Dispatcher Goldfish/);
 });

@@ -67,9 +67,8 @@ function readState(filePath) {
     if (state.browserInteractionMode !== "automatic" && state.browserInteractionMode !== "manual") {
       state.browserInteractionMode = DEFAULT_STATE.browserInteractionMode;
     }
-    if (state.coreSetupComplete !== true) {
-      if (state.onboardingComplete !== true) state.browserInteractionMode = "automatic";
-      state.zeroRiskProEnabled = false;
+    if (state.coreSetupComplete !== true && state.onboardingComplete !== true) {
+      state.browserInteractionMode = "automatic";
     }
     if (state.browserSmokeVersion !== null
       && (typeof state.browserSmokeVersion !== "string" || state.browserSmokeVersion.length > 128)) {

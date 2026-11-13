@@ -26,8 +26,58 @@ import type {
   LauncherState,
   LogRecord,
   OperationState,
+  SuperAgentSnapshot,
   Surface,
 } from "./types";
+
+const PLATFORM_CATEGORY_GROUPS = [
+  {
+    id: "llm",
+    label: "LLM",
+    title: "Plateformes LLM occidentales",
+    items: [
+      { id: "chatgpt", label: "ChatGPT Web" },
+      { id: "claude", label: "Claude Web" },
+      { id: "grok", label: "xAI Grok" },
+      { id: "gemini", label: "Google Gemini" },
+      { id: "muse", label: "Muse AI" },
+    ],
+  },
+  {
+    id: "google-lab",
+    label: "Google Lab",
+    title: "Google AI Studio, NotebookLM, Workspace Studio & Jules",
+    items: [
+      { id: "aistudio", label: "Google AI Studio" },
+      { id: "notebooklm", label: "NotebookLM" },
+      { id: "workspacestudio", label: "Workspace Studio" },
+      { id: "jules", label: "Google Jules" },
+    ],
+  },
+  {
+    id: "chinese-models",
+    label: "Modèles Chinois",
+    title: "Modèles Chinois & Feishu / Lark",
+    items: [
+      { id: "deepseek", label: "DeepSeek Chat" },
+      { id: "qwen", label: "Qwen Chat" },
+      { id: "zai", label: "Z.ai (GLM)" },
+      { id: "kimi", label: "Moonshot Kimi" },
+      { id: "feishu", label: "Feishu Bot / Open" },
+      { id: "lark", label: "Lark Suite (Global)" },
+    ],
+  },
+  {
+    id: "local-fugu",
+    label: "Local / Fugu",
+    title: "Routeurs locaux & Sakana Fugu",
+    items: [
+      { id: "sakana", label: "Sakana AI (Fugu)" },
+      { id: "lfm3_local", label: "LFM3-Omni (:9931)" },
+      { id: "freellmapi", label: "FreeLLMAPI (:31415)" },
+    ],
+  },
+] as const;
 
 const api = window.codexWebLauncher;
 const PANEL_TRANSITION = { duration: 0.3, ease: [0.16, 1, 0.3, 1] } as const;
@@ -319,7 +369,7 @@ function Onboarding({
           ))}
         </div>
         <PrimaryButton
-          disabled={busy || (stage === "support" && (!snapshot.state.githubOpened || !snapshot.state.xOpened))}
+          disabled={busy}
           onClick={isLanguage
             ? chooseLanguage
             : isInteraction ? () => setStage("support") : finish}
@@ -585,6 +635,13 @@ function LauncherShell({
                   label={copy.browser}
                   onClick={() => navigateSurface("browser")}
                 />
+                <SidebarItem
+                  active={surface === "superagent"}
+                  badge={<ActionDot tone="optional" />}
+                  icon="activity"
+                  label="SuperAgent (:3082)"
+                  onClick={() => navigateSurface("superagent")}
+                />
               </SidebarGroup>
               <SidebarGroup label={copy.configuration}>
                 <SidebarItem
@@ -694,6 +751,9 @@ function LauncherShell({
                 snapshot={snapshot}
                 updateState={updateState}
               />
+            ) : null}
+            {surface === "superagent" ? (
+              <SuperAgentSurface setError={setError} />
             ) : null}
             {surface === "mcp" ? (
               <McpSurface
@@ -861,6 +921,7 @@ function BrowserSurface({
     && platform === "darwin"
     && (browser?.authenticated !== true || passkeyActive);
   const selectedManualTab = browser?.tabs.find(tab => tab.active && tab.interactionMode === "manual");
+  const embeddedChromeActive = browser?.tabs.some(tab => tab.active && tab.isEmbeddedChrome) === true;
   const navigationLocked = passkeyActive || browser?.status === "running" || browser?.status === "testing";
   const passkeyWaiting = passkeyAvailable && passkeyPhase === "waiting";
   const passkeyImporting = passkeyPhase === "importing" || passkeyContinuationRequested;
@@ -980,6 +1041,33 @@ function BrowserSurface({
             ) : null}
           </div>
         ))}
+        {PLATFORM_CATEGORY_GROUPS.map((group) => (
+          <select
+            key={group.id}
+            aria-label={group.label}
+            className="toolbar-text-button"
+            defaultValue=""
+            onChange={(event) => {
+              const id = event.currentTarget.value;
+              event.currentTarget.value = "";
+              if (!id) return;
+              void api?.openPlatformTab?.(id).catch((cause) => setError(messageOf(cause)));
+            }}
+            style={{
+              fontSize: 12,
+              padding: "2px 6px",
+              maxWidth: 130,
+              flex: "0 0 auto",
+              WebkitAppRegion: "no-drag",
+            } as React.CSSProperties}
+            title={group.title}
+          >
+            <option value="" disabled>{group.label} ▾</option>
+            {group.items.map((item) => (
+              <option key={item.id} value={item.id}>{item.label}</option>
+            ))}
+          </select>
+        ))}
         <div className="browser-tab-drag draggable" />
       </div>
       <div className="browser-toolbar">
@@ -1047,7 +1135,7 @@ function BrowserSurface({
           tab={selectedManualTab}
         />
       ) : null}
-      <div className="browser-viewport" ref={browserSlotRef}>
+      <div className={`browser-viewport${embeddedChromeActive ? " is-embedded-chrome" : ""}`} ref={browserSlotRef}>
         {!visible ? (
           <div className="browser-empty">
             <BrandMark />
@@ -1229,14 +1317,14 @@ function SetupSurface({
             : devProfile ? copy.devInstall : copy.install}
           complete={snapshot.state.coreSetupComplete === true}
           description={devProfile ? copy.devStepInstallBody : copy.stepInstallBody}
-          disabled={busy || (!snapshot.smokePassed && snapshot.state.coreSetupComplete !== true)}
+          disabled={busy}
           index={manualInteraction ? 1 : 3}
           onAction={install}
           repeatable
           title={devProfile ? copy.devStepInstall : copy.stepInstall}
           titleAction={manualInteraction ? (
             <ZeroRiskModelMenu
-              busy={busy || snapshot.state.coreSetupComplete !== true}
+              busy={busy}
               copy={copy}
               proEnabled={snapshot.state.zeroRiskProEnabled}
               onChange={(enabled) => void setZeroRiskPro(enabled)}
@@ -1254,7 +1342,7 @@ function SetupSurface({
       <SectionHeading label="MCP" meta={manualInteraction ? copy.required : copy.optional} spaced />
       <button
         className="next-surface-row"
-        disabled={!manualInteraction && !snapshot.state.coreSetupComplete}
+        disabled={false}
         onClick={showMcp}
         type="button"
       >
@@ -1498,9 +1586,7 @@ function McpSurface({
             ) : null}
             {step === 1 ? (
               <p className="mcp-step-two-hint">
-                {manualInteraction || configuringInactiveMode || snapshot.state.coreSetupComplete
-                  ? copy.mcpStepTwoHint
-                  : copy.mcpSetupRequired}
+                {copy.mcpStepTwoHint}
               </p>
             ) : null}
             {step === 2 ? (
@@ -1545,7 +1631,6 @@ function McpSurface({
           <PrimaryButton
             disabled={
               busy
-              || (!manualInteraction && !configuringInactiveMode && !snapshot.state.coreSetupComplete)
               || ((!credentialsConfigured || replacingCredentials) && (!tunnelId || !runtimeKey))
             }
             onClick={() => void install()}
@@ -1900,17 +1985,14 @@ function SettingsSurface({
         >
           <Switch
             checked={snapshot.state.experimentalBiggerContext}
-            disabled={busy
-              || snapshot.state.browserInteractionMode === "manual"
-              || (snapshot.state.biggerContextAvailable !== true && !snapshot.state.experimentalBiggerContext)
-              || snapshot.state.coreSetupComplete !== true}
+            disabled={busy || snapshot.state.browserInteractionMode === "manual"}
             onChange={(checked) => void setBiggerContext(checked)}
           />
         </SettingRow>
         <SettingRow body={copy.composerPredictionsBody} label={copy.composerPredictions}>
           <Switch
             checked={snapshot.state.composerPredictionsEnabled}
-            disabled={busy || !snapshot.state.coreSetupComplete}
+            disabled={busy}
             onChange={(checked) => void setComposerPredictions(checked)}
           />
         </SettingRow>
@@ -1918,7 +2000,7 @@ function SettingsSurface({
           ? copy.manualSkillAttachmentsUnavailable : copy.skillAttachmentsBody} label={copy.skillAttachments}>
           <Switch
             checked={snapshot.state.experimentalSkillAttachments}
-            disabled={busy || snapshot.state.browserInteractionMode === "manual" || !snapshot.state.coreSetupComplete}
+            disabled={busy || snapshot.state.browserInteractionMode === "manual"}
             onChange={(checked) => void setSkillAttachments(checked)}
           />
         </SettingRow>
@@ -1926,7 +2008,7 @@ function SettingsSurface({
           ? copy.manualFreshConversationUnavailable : copy.freshConversationBody} label={copy.freshConversation}>
           <Switch
             checked={snapshot.state.experimentalFreshConversationPerTurn}
-            disabled={busy || snapshot.state.browserInteractionMode === "manual" || snapshot.state.coreSetupComplete !== true}
+            disabled={busy || snapshot.state.browserInteractionMode === "manual"}
             onChange={(checked) => void setFreshConversationPerTurn(checked)}
           />
         </SettingRow>
@@ -1934,14 +2016,14 @@ function SettingsSurface({
           ? copy.manualAutoApproveUnavailable : copy.autoApproveToolsBody} label={copy.autoApproveTools}>
           <Switch
             checked={snapshot.state.browserInteractionMode !== "manual" && snapshot.state.autoApproveToolCalls}
-            disabled={busy || snapshot.state.browserInteractionMode === "manual" || !snapshot.state.coreSetupComplete}
+            disabled={busy || snapshot.state.browserInteractionMode === "manual"}
             onChange={(checked) => void setAutoApproveToolCalls(checked)}
           />
         </SettingRow>
         <SettingRow body={copy.temporaryChatsBody} label={copy.temporaryChats}>
           <Switch
             checked={snapshot.state.useTemporaryChats}
-            disabled={busy || snapshot.state.coreSetupComplete !== true}
+            disabled={busy}
             onChange={(checked) => void setTemporaryChats(checked)}
           />
         </SettingRow>
@@ -2749,11 +2831,313 @@ function LaunchLoading() {
   );
 }
 
+function SuperAgentSurface({ setError }: { setError: (error: string | null) => void }) {
+  const [snap, setSnap] = useState<SuperAgentSnapshot | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [webhookUrl, setWebhookUrl] = useState("");
+  const [testTag, setTestTag] = useState("person/delivery");
+  const [testMessage, setTestMessage] = useState("Signal CPU -> Google Chat Space LD08");
+  const [mergeTarget, setMergeTarget] = useState("");
+  const [manifestName, setManifestName] = useState("V0.1_Phases_1_9_CPU_Contrat.md");
+  const [manifestVersion, setManifestVersion] = useState("V0.1");
+  const [manifestExcerpt, setManifestExcerpt] = useState("");
+  const [statusNote, setStatusNote] = useState<string | null>(null);
+
+  const refresh = useCallback(async () => {
+    if (!api?.superagentStatus) return;
+    try {
+      const next = await api.superagentStatus();
+      setSnap(next);
+    } catch (cause) {
+      setError(messageOf(cause));
+    }
+  }, [setError]);
+
+  useEffect(() => {
+    void refresh();
+    const timer = window.setInterval(() => void refresh(), 3000);
+    return () => window.clearInterval(timer);
+  }, [refresh]);
+
+  const runAction = async (fn: () => Promise<unknown>, successText?: string) => {
+    setBusy(true);
+    setError(null);
+    setStatusNote(null);
+    try {
+      await fn();
+      if (successText) setStatusNote(successText);
+      await refresh();
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const ticketRows = Array.isArray((snap?.tickets as { tickets?: unknown[] } | null)?.tickets)
+    ? ((snap?.tickets as { tickets: Array<Record<string, unknown>> }).tickets)
+    : Array.isArray(snap?.tickets)
+      ? (snap.tickets as Array<Record<string, unknown>>)
+      : [];
+  const goldfishRows = Array.isArray(snap?.goldfishMissions) ? snap.goldfishMissions : [];
+
+  return (
+    <ContentSurface
+      eyebrow="Aspace OS V5 · Runtime Unifié"
+      narrow
+      subtitle="Orchestrateur DeepSeek Superagent (:3082), Dev Auto-Merge et pont temps réel vers Google Chat Space LD08."
+      title="CPU × SuperAgent"
+    >
+      <SectionHeading label="État du Daemon SuperAgent (:3082)" />
+      <div className="settings-list">
+        <SettingRow
+          body={snap?.online
+            ? `Actif sur ${snap.endpoint} · Charge ${snap.state?.load ?? 0}/${snap.state?.maxWorkers ?? 0} · ${snap.state?.paused ? "En pause" : "Exécution active"}${snap.state?.setup?.problem?.detail ? ` · ${snap.state.setup.problem.detail}` : ""}`
+            : `Hors ligne (${snap?.error || "port 3082 fermé"}) · Profil ${snap?.profile.patchPath ?? "~/.dsh/profiles/superagent/cordis.patch.yml"}`}
+          label={snap?.online ? "SuperAgent En ligne" : "SuperAgent Arrêté"}
+        >
+          <div className="manual-turn-actions">
+            {!snap?.online ? (
+              <PrimaryButton
+                disabled={busy}
+                onClick={() => void runAction(() => api!.superagentStart!(), "Démarrage de dsh --profile superagent --no-open lancé (~35s à froid sous Windows).")}
+              >
+                Démarrer (:3082)
+              </PrimaryButton>
+            ) : (
+              <SecondaryButton
+                disabled={busy}
+                onClick={() => void runAction(() => api!.superagentPause!(!snap.state?.paused))}
+              >
+                {snap.state?.paused ? "Reprendre" : "Pause"}
+              </SecondaryButton>
+            )}
+            <SecondaryButton disabled={busy} onClick={() => void refresh()}>
+              Rafraîchir
+            </SecondaryButton>
+          </div>
+        </SettingRow>
+
+        <SettingRow
+          body="En phase de Développement, les branches/PR non-production utilisent gh pr merge --auto --squash pour maximiser la vélocité."
+          label="Auto-Merge Dev (Production isolée)"
+        >
+          <Switch
+            checked={snap?.bridge.devAutoMergeEnabled !== false}
+            onChange={(checked) => void runAction(
+              () => api!.superagentSaveConfig!({ devAutoMergeEnabled: checked }),
+              `Dev Auto-Merge ${checked ? "activé" : "désactivé"}.`,
+            )}
+          />
+        </SettingRow>
+      </div>
+
+      <SectionHeading label="Pont Google Chat Space LD08 (Tags person/*)" />
+      <div className="settings-list">
+        <FieldRow label="Webhook Google Chat Space LD08">
+          <input
+            disabled={busy}
+            onChange={(e) => setWebhookUrl(e.target.value)}
+            placeholder={snap?.bridge.ld08WebhookConfigured ? "Webhook LD08 déjà configuré (coller pour remplacer)" : "https://chat.googleapis.com/v1/spaces/.../messages?key=..."}
+            type="url"
+            value={webhookUrl}
+          />
+        </FieldRow>
+        <div className="manual-turn-actions">
+          <SecondaryButton
+            disabled={busy || !webhookUrl.trim()}
+            onClick={() => void runAction(
+              () => api!.superagentSaveConfig!({ ld08WebhookUrl: webhookUrl.trim() }).then(() => setWebhookUrl("")),
+              "Webhook Google Chat LD08 enregistré dans ~/.dsh/state/superagent/aspace-bridge.json",
+            )}
+          >
+            Sauvegarder Webhook LD08
+          </SecondaryButton>
+        </div>
+
+        <FieldRow label="Tag & Message vers LD08">
+          <div className="manual-turn-actions" style={{ flexWrap: "wrap", width: "100%" }}>
+            <select
+              className="toolbar-text-button"
+              disabled={busy}
+              onChange={(e) => setTestTag(e.target.value)}
+              value={testTag}
+            >
+              <option value="person/delivery">person/delivery</option>
+              <option value="person/answer">person/answer</option>
+              <option value="person/review">person/review</option>
+              <option value="person/blocked">person/blocked</option>
+              <option value="working">working</option>
+            </select>
+            <input
+              disabled={busy}
+              onChange={(e) => setTestMessage(e.target.value)}
+              style={{ flex: 1, minWidth: 200 }}
+              type="text"
+              value={testMessage}
+            />
+            <PrimaryButton
+              disabled={busy || (!snap?.bridge.ld08WebhookConfigured && !webhookUrl.trim())}
+              onClick={() => void runAction(
+                () => api!.superagentTestLd08!({
+                  tag: testTag,
+                  message: testMessage,
+                  ...(webhookUrl.trim() ? { webhookUrl: webhookUrl.trim() } : {}),
+                }),
+                `Tag [${testTag}] transmis au Space Google Chat LD08.`,
+              )}
+            >
+              Envoyer vers LD08
+            </PrimaryButton>
+          </div>
+        </FieldRow>
+
+        <FieldRow label="Déclencher Dev Auto-Merge (PR # ou branche Dev)">
+          <div className="manual-turn-actions" style={{ width: "100%" }}>
+            <input
+              disabled={busy}
+              onChange={(e) => setMergeTarget(e.target.value)}
+              placeholder="ex: 42 ou feat/aspace-dev"
+              style={{ flex: 1 }}
+              type="text"
+              value={mergeTarget}
+            />
+            <SecondaryButton
+              disabled={busy || !mergeTarget.trim()}
+              onClick={() => void runAction(
+                () => api!.superagentAutomerge!({ target: mergeTarget.trim() }),
+                `Auto-merge Dev lancé pour ${mergeTarget.trim()}`,
+              )}
+            >
+              Auto-Merge Dev
+            </SecondaryButton>
+          </div>
+        </FieldRow>
+      </div>
+
+      <SectionHeading label="Phase 5 · Manifest Drive → EGM Goldfish Factory" />
+      <div className="settings-list">
+        <FieldRow label="Manifest Drive & Version (ex: V0.1)">
+          <div className="manual-turn-actions" style={{ flexWrap: "wrap", width: "100%" }}>
+            <input
+              disabled={busy}
+              onChange={(e) => setManifestName(e.target.value)}
+              placeholder="ex: V0.1_Phases_1_9_CPU_Contrat.md"
+              style={{ flex: 2, minWidth: 180 }}
+              type="text"
+              value={manifestName}
+            />
+            <input
+              disabled={busy}
+              onChange={(e) => setManifestVersion(e.target.value)}
+              placeholder="V0.1"
+              style={{ width: 90 }}
+              type="text"
+              value={manifestVersion}
+            />
+          </div>
+        </FieldRow>
+        <FieldRow label="Extrait / Périmètre Goldfish (optionnel)">
+          <div className="manual-turn-actions" style={{ width: "100%" }}>
+            <input
+              disabled={busy}
+              onChange={(e) => setManifestExcerpt(e.target.value)}
+              placeholder="Scope ou URL Drive du manifest à transformer en contrat Goldfish"
+              style={{ flex: 1 }}
+              type="text"
+              value={manifestExcerpt}
+            />
+            <PrimaryButton
+              disabled={busy || !manifestName.trim() || !api?.superagentDispatchManifest}
+              onClick={() => void runAction(
+                async () => {
+                  const res = await api!.superagentDispatchManifest!({
+                    manifestName: manifestName.trim(),
+                    versionFolder: manifestVersion.trim() || "V0.1",
+                    ...(manifestExcerpt.trim() ? { excerpt: manifestExcerpt.trim() } : {}),
+                    source: "cpu-phase5-ui",
+                    notifyLd08: Boolean(snap?.bridge.ld08WebhookConfigured),
+                  });
+                  setStatusNote(
+                    `${res.deduplicated ? "Goldfish existant réutilisé" : "Contrat Goldfish créé"} : ${res.mission.missionId} (${res.mission.factoryIntake?.ticketId || res.contractPath})`,
+                  );
+                },
+              )}
+            >
+              Dispatcher Goldfish
+            </PrimaryButton>
+          </div>
+        </FieldRow>
+      </div>
+
+      {statusNote ? <p style={{ color: "var(--color-accent, #4ade80)", marginTop: 8 }}>{statusNote}</p> : null}
+
+      <SectionHeading label={`Missions EGM Goldfish (${goldfishRows.length})`} />
+      <div className="activity-table">
+        {goldfishRows.length === 0 ? (
+          <div className="surface-empty">
+            <Icon name="activity" />
+            <span>Aucune mission Goldfish enregistrée — dispatchez un manifest Drive V0.1 ci-dessus.</span>
+          </div>
+        ) : goldfishRows.map((mission) => (
+          <div className="activity-row" key={mission.missionId}>
+            <StateDot state="ready" />
+            <div>
+              <strong>{mission.manifestName}</strong>
+              <span>{`${mission.missionId} · ${mission.versionFolder} · ${mission.branchPolicy}${mission.factoryIntake?.ticketId ? ` · ${mission.factoryIntake.ticketId}` : ""}`}</span>
+            </div>
+            <SecondaryButton
+              disabled={busy || !api?.superagentDispatchManifest}
+              onClick={() => void runAction(
+                () => api!.superagentDispatchManifest!({
+                  manifestId: mission.manifestId,
+                  manifestName: mission.manifestName,
+                  versionFolder: mission.versionFolder,
+                  excerpt: mission.excerpt,
+                  source: "cpu-phase5-ui-replay",
+                  force: true,
+                }),
+                `Goldfish ${mission.missionId} relancé.`,
+              )}
+            >
+              Relancer
+            </SecondaryButton>
+          </div>
+        ))}
+      </div>
+
+      <SectionHeading label={`Mandats / Tickets SuperAgent (${ticketRows.length})`} />
+      <div className="activity-table">
+        {ticketRows.length === 0 ? (
+          <div className="surface-empty">
+            <Icon name="activity" />
+            <span>{snap?.online ? "Aucun ticket ouvert sur :3082." : "Démarrez SuperAgent (:3082) pour lister les tickets et threads."}</span>
+          </div>
+        ) : ticketRows.map((ticket, index) => (
+          <div className="activity-row" key={String(ticket.id ?? index)}>
+            <StateDot state={String(ticket.stage || "").includes("blocked") || String(ticket.stage || "").includes("failed") ? "error" : "ready"} />
+            <div>
+              <strong>{String(ticket.title || ticket.id || "Ticket")}</strong>
+              <span>{`${String(ticket.stage || "working")} · ${String(ticket.id || "")}`}</span>
+            </div>
+            <SecondaryButton
+              disabled={busy}
+              onClick={() => void runAction(() => api!.superagentRetryTicket!(String(ticket.id)))}
+            >
+              Relancer
+            </SecondaryButton>
+          </div>
+        ))}
+      </div>
+    </ContentSurface>
+  );
+}
+
 function FatalMessage({ message }: { message: string }) {
   return (
     <main className="fatal-message">
       <BrandMark />
-      <h1>Codex Web GPT</h1>
+      <h1>CPU — CLI-Plateformes-Unifié</h1>
       <p>{message}</p>
     </main>
   );

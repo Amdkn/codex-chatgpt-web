@@ -770,6 +770,12 @@ code {
   color: var(--color-text-primary);
 }
 
+select.toolbar-text-button option,
+select.toolbar-text-button optgroup {
+  background: #1d1d20;
+  color: #f4f4f5;
+}
+
 .browser-loading-line {
   position: absolute;
   right: 0;
@@ -854,6 +860,12 @@ code {
   flex: 1;
   overflow: hidden;
   background: #ffffff;
+}
+
+.browser-viewport.is-embedded-chrome,
+.browser-viewport.is-embedded-chrome .browser-underlay {
+  background: #181818;
+  color: var(--color-text-secondary);
 }
 
 .passkey-login-guide {

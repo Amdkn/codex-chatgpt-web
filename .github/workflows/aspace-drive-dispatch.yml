@@ -1,0 +1,92 @@
+name: Aspace Drive Manifest -> EGM Goldfish Dispatch
+
+on:
+  repository_dispatch:
+    types: [aspace_drive_manifest]
+  workflow_dispatch:
+    inputs:
+      manifest_id:
+        description: "Drive File ID"
+        required: false
+        default: "manual_dispatch"
+      manifest_name:
+        description: "Manifest filename"
+        required: false
+        default: "V0.1_Phases_1_9_CPU_Contrat.md"
+      version_folder:
+        description: "Version folder (V0.0.1, V0.1, V0.2..)"
+        required: false
+        default: "V0.1"
+      manifest_url:
+        description: "Drive file URL"
+        required: false
+        default: ""
+      excerpt:
+        description: "Manifest excerpt / scope"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  goldfish-factory:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.0
+
+      - name: Install root & launcher dependencies
+        run: |
+          bun install --frozen-lockfile
+          bun install --frozen-lockfile --cwd launcher
+
+      - name: Generate EGM Goldfish Contract & Queue Entry
+        env:
+          ASPACE_SKIP_FACTORY_INTAKE: "1"
+          MANIFEST_ID: ${{ github.event.client_payload.manifest_id || inputs.manifest_id || 'workflow_dispatch' }}
+          MANIFEST_NAME: ${{ github.event.client_payload.manifest_name || inputs.manifest_name || 'V0.1_Phases_1_9_CPU_Contrat.md' }}
+          VERSION_FOLDER: ${{ github.event.client_payload.version_folder || inputs.version_folder || 'V0.1' }}
+          MANIFEST_URL: ${{ github.event.client_payload.manifest_url || inputs.manifest_url || '' }}
+          EXCERPT: ${{ github.event.client_payload.excerpt || inputs.excerpt || '' }}
+          DISPATCH_SOURCE: ${{ github.event_name == 'repository_dispatch' && 'apps-script-drive-poll' || 'github-workflow-dispatch' }}
+        run: |
+          bun run src/cli.ts palier dispatch-manifest \
+            --name "$MANIFEST_NAME" \
+            --id "$MANIFEST_ID" \
+            --folder "$VERSION_FOLDER" \
+            --url "$MANIFEST_URL" \
+            --source "$DISPATCH_SOURCE" \
+            --excerpt "$EXCERPT" \
+            --out docs/egm/goldfish \
+            --skip-factory-intake \
+            --json
+
+      - name: Run CPU Palier & Wiring Tests
+        run: |
+          bun test ./tests/aspace-palier-orchestrator.test.ts
+          node --test launcher/tests/local-chrome-cdp.test.cjs launcher/tests/renderer-wiring.test.cjs
+
+      - name: Upload EGM Goldfish Contract Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: egm-goldfish-contract
+          path: docs/egm/goldfish/
+
+      - name: Notify Google Chat Space LD08 (if configured)
+        if: always()
+        env:
+          GCHAT_LD08_WEBHOOK_URL: ${{ secrets.GCHAT_LD08_WEBHOOK_URL }}
+          MANIFEST_NAME: ${{ github.event.client_payload.manifest_name || inputs.manifest_name || 'V0.1_Phases_1_9_CPU_Contrat.md' }}
+          VERSION_FOLDER: ${{ github.event.client_payload.version_folder || inputs.version_folder || 'V0.1' }}
+          DISPATCH_STATUS: ${{ job.status }}
+        run: |
+          if [ -z "$GCHAT_LD08_WEBHOOK_URL" ]; then
+            echo "GCHAT_LD08_WEBHOOK_URL secret not configured; skipping webhook."
+            exit 0
+          fi
+          PAYLOAD=$(jq -n --arg tag "person/delivery" --arg msg "GitHub Actions EGM Goldfish ($DISPATCH_STATUS) · ${VERSION_FOLDER} · ${MANIFEST_NAME} · run ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" '{text: ("[" + $tag + "] " + $msg)}')
+          curl -fsSL -X POST -H "Content-Type: application/json" -d "$PAYLOAD" "$GCHAT_LD08_WEBHOOK_URL"

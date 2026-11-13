@@ -30,6 +30,13 @@ import { installRuntimeKeyBytes, managedRuntimeKeyPath, stopTunnel, tunnelStatus
 import { getTunnelServiceStatus, restartTunnelService, startTunnelService, stopTunnelService, uninstallTunnelService } from "./tunnel-service";
 import { VERSION } from "./version";
 import { runDevCommand } from "./dev-chat/cli";
+import {
+  collectPalierReadiness,
+  exportCliHarnessConfig,
+  SUPPORTED_CLI_HARNESSES,
+  type AgnosticCliHarness,
+} from "./adapters/aspace-palier-orchestrator";
+import { dispatchDriveManifestToEgmGoldfish } from "./adapters/aspace-superagent-bridge";
 
 const HELP = `codex-chatgpt-web ${VERSION}
 
@@ -629,6 +636,64 @@ async function main(): Promise<void> {
   }
   else if (command === "tunnel") await tunnelCommand(args);
   else if (command === "open") await openCommand(args);
+  else if (command === "palier") {
+    const action = args.shift() ?? "status";
+    if (action === "status") {
+      takeFlag(args, "--json");
+      assertNoArgs(args);
+      stdout.write(`${JSON.stringify(collectPalierReadiness(), null, 2)}\n`);
+    } else if (action === "export") {
+      const harness = (args.shift() ?? "codex") as AgnosticCliHarness;
+      const portRaw = takeOption(args, "--port");
+      assertNoArgs(args);
+      if (!SUPPORTED_CLI_HARNESSES.includes(harness)) {
+        throw new Error(`Unsupported harness "${harness}". Expected: ${SUPPORTED_CLI_HARNESSES.join(", ")}`);
+      }
+      const port = portRaw ? Number(portRaw) : 17841;
+      stdout.write(`${JSON.stringify(exportCliHarnessConfig(harness, port), null, 2)}\n`);
+    } else if (action === "dispatch-manifest") {
+      const manifestName = takeOption(args, "--name")?.trim() ?? "";
+      const manifestId = takeOption(args, "--id");
+      const versionFolder = takeOption(args, "--folder");
+      const manifestUrl = takeOption(args, "--url");
+      const excerpt = takeOption(args, "--excerpt");
+      const source = takeOption(args, "--source") ?? "cli";
+      const outDir = takeOption(args, "--out");
+      const repo = takeOption(args, "--repo");
+      const tag = takeOption(args, "--tag");
+      const notifyLd08 = takeFlag(args, "--notify-ld08");
+      const triggerGithubDispatch = takeFlag(args, "--github-dispatch");
+      const skipFactoryIntake = takeFlag(args, "--skip-factory-intake");
+      const force = takeFlag(args, "--force");
+      const asJson = takeFlag(args, "--json");
+      assertNoArgs(args);
+      if (!manifestName) {
+        throw new Error("Usage: palier dispatch-manifest --name <file> [--id <driveId>] [--folder V0.1] [--excerpt <text>] [--out <dir>] [--json]");
+      }
+      const result = await dispatchDriveManifestToEgmGoldfish({
+        manifestName,
+        manifestId,
+        versionFolder,
+        manifestUrl,
+        excerpt,
+        source,
+        outDir,
+        repo,
+        tag,
+        notifyLd08,
+        triggerGithubDispatch,
+        skipFactoryIntake,
+        force,
+      });
+      if (asJson) {
+        stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+      } else {
+        stdout.write(`Goldfish ${result.deduplicated ? "deduplicated" : "dispatched"}: ${result.mission.missionId} -> ${result.contractPath}\n`);
+      }
+    } else {
+      throw new Error("Palier command must be: palier <status|export <harness> [--port N]|dispatch-manifest --name <file>>");
+    }
+  }
   else if (command === "uninstall") await uninstallCommand(args);
   else throw new Error(`Unknown command: ${command}\n\n${HELP}`);
 }

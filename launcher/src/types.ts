@@ -4,7 +4,7 @@ import type { LimitsSnapshot } from "./limits-types";
 export type Language = keyof typeof languages;
 export type LauncherProfile = "production" | "development";
 export type BrowserInteractionMode = "automatic" | "manual";
-export type Surface = "browser" | "setup" | "mcp" | "activity" | "limits" | "settings";
+export type Surface = "browser" | "superagent" | "setup" | "mcp" | "activity" | "limits" | "settings";
 
 export interface LauncherState {
   version: 1;
@@ -63,6 +63,7 @@ export interface BrowserTabState {
   loading: boolean;
   active: boolean;
   closable: boolean;
+  isEmbeddedChrome?: boolean;
   interactionMode?: BrowserInteractionMode;
   approvalPending?: boolean;
   authenticationRequired?: boolean;
@@ -137,6 +138,74 @@ export interface LauncherSnapshot {
   update: UpdateState;
 }
 
+export interface EgmGoldfishMission {
+  missionId: string;
+  manifestId: string;
+  manifestName: string;
+  versionFolder: string;
+  manifestUrl?: string;
+  source: string;
+  checksumSha256: string;
+  excerpt: string;
+  branchPolicy: string;
+  prodIsolation: boolean;
+  contractPath: string;
+  createdAt: string;
+  updatedAt: string;
+  dispatches: number;
+  factoryIntake?: {
+    attempted: boolean;
+    queued: boolean;
+    ticketId?: string;
+    reason?: string;
+  };
+  githubDispatch?: {
+    attempted: boolean;
+    dispatched: boolean;
+    repo?: string;
+    error?: string;
+  };
+  ld08Notification?: {
+    attempted: boolean;
+    delivered: boolean;
+    tag?: string;
+    status?: number;
+    reason?: string;
+  };
+}
+
+export interface SuperAgentSnapshot {
+  online: boolean;
+  endpoint: string;
+  error?: string;
+  profile: {
+    profileDir: string;
+    stateDir: string;
+    patchPath: string;
+    pluginPath: string;
+    pluginPresent: boolean;
+    endpoint: string;
+  };
+  bridge: {
+    ld08WebhookConfigured: boolean;
+    devAutoMergeEnabled: boolean;
+  };
+  goldfishMissions?: EgmGoldfishMission[];
+  state: {
+    setup?: {
+      problem?: { detail?: string; code?: string } | null;
+      [key: string]: unknown;
+    };
+    load?: number;
+    maxWorkers?: number;
+    paused?: boolean;
+    health?: unknown;
+  } | null;
+  overview: unknown;
+  tickets: unknown;
+  threads: unknown;
+}
+
 export interface LauncherApi {
   snapshot(): Promise<LauncherSnapshot>;
   getLimits(): Promise<LimitsSnapshot>;
@@ -153,6 +222,30 @@ export interface LauncherApi {
   zoomBrowser(action: "in" | "out" | "reset"): Promise<BrowserState>;
   selectBrowserTab(tabId: string): Promise<BrowserState>;
   closeBrowserTab(tabId: string): Promise<BrowserState>;
+  openPlatformTab?(providerId: string): Promise<BrowserState>;
+  superagentStatus?(): Promise<SuperAgentSnapshot>;
+  superagentStart?(): Promise<SuperAgentSnapshot>;
+  superagentPause?(paused: boolean): Promise<SuperAgentSnapshot>;
+  superagentRetryTicket?(ticketId: string): Promise<SuperAgentSnapshot>;
+  superagentSaveConfig?(patch: { ld08WebhookUrl?: string; devAutoMergeEnabled?: boolean }): Promise<{
+    saved: boolean;
+    ld08WebhookConfigured: boolean;
+    devAutoMergeEnabled: boolean;
+  }>;
+  superagentTestLd08?(input: { tag?: string; message?: string; webhookUrl?: string }): Promise<{ delivered: boolean; status: number }>;
+  superagentAutomerge?(input: { target: string; repoPath?: string }): Promise<{ mergedOrQueued: boolean; output: string }>;
+  superagentEgmMissions?(): Promise<{ count: number; queuePath: string; missions: EgmGoldfishMission[] }>;
+  superagentDispatchManifest?(input: {
+    manifestName: string;
+    manifestId?: string;
+    versionFolder?: string;
+    manifestUrl?: string;
+    excerpt?: string;
+    source?: string;
+    notifyLd08?: boolean;
+    triggerGithubDispatch?: boolean;
+    force?: boolean;
+  }): Promise<{ ok: boolean; deduplicated: boolean; mission: EgmGoldfishMission; contractPath: string; queuePath: string }>;
   copyManualPrompt(tabId: string): Promise<BrowserState>;
   confirmManualSent(tabId: string): Promise<BrowserState>;
   openLogin(): Promise<BrowserState>;

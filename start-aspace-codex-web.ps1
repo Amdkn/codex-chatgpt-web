@@ -16,6 +16,8 @@ $UpdatePath = Join-Path $RepoRoot "launcher\electron\update.cjs"
 $env:ASPACE_ZERO_TELEMETRY = "1"
 $env:ASPACE_ALLOW_EXTERNAL_UPDATE = "0"
 $env:DO_NOT_TRACK = "1"
+$env:CODEX_CHATGPT_WEB_BUN = "C:\Users\amado\.bun\bin\bun.exe"
+$env:PATH = "C:\Users\amado\.bun\bin;$env:PATH"
 
 if ($VerifyOnly) {
     Push-Location $RepoRoot
@@ -45,9 +47,12 @@ console.log(JSON.stringify({
 }
 
 Write-Host "[Aspace OS V5] Lancement de Codex Web GPT Souverain (Zero-Telemetry Shield actif)..." -ForegroundColor Cyan
-Push-Location $RepoRoot
+$launcherDir = Join-Path $RepoRoot "launcher"
+$electronExe = Join-Path $launcherDir "node_modules\electron\dist\electron.exe"
+
+Push-Location $launcherDir
 try {
-    & npx electron .
+    & $electronExe .
 } finally {
     Pop-Location
 }

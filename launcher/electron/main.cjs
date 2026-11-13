@@ -20,6 +20,17 @@ const {
   Tray,
 } = require("electron");
 const { BrowserHost, navigationErrorForLog } = require("./browser-host.cjs");
+const {
+  dispatchDriveManifestToEgmGoldfish,
+  ensureSuperAgentProfile,
+  getSuperAgentSnapshot,
+  listEgmGoldfishMissions,
+  notifyGoogleChatLD08,
+  orchestratorRequest,
+  startSuperAgentDaemon,
+  triggerDevAutoMerge,
+  writeBridgeConfig,
+} = require("./aspace-superagent-bridge.cjs");
 const { SessionReminderView } = require("./session-reminder-view.cjs");
 const { BrowserControlServer } = require("./control-server.cjs");
 const { LimitsController } = require("./limits-controller.cjs");
@@ -234,80 +245,64 @@ function trayImage() {
 
 const NATIVE_COPY = Object.freeze({
   "en": Object.freeze({
-    openLauncher: "Open Codex Web GPT",
+    openLauncher: "Open CPU — CLI-Plateformes-Unifié",
     quit: "Quit",
     exportDiagnostics: "Export privacy-safe diagnostics",
     cancel: "Cancel",
     remove: "Remove",
-    removeTitle: "Remove Codex Web GPT",
+    removeTitle: "Remove CPU — CLI-Plateformes-Unifié",
     removeMessage: "Remove the ChatGPT Web models from Codex and restore the previous model route?",
     removeDetail: "The launcher's ChatGPT login profile will be preserved. Codex must be restarted once.",
     retry: "Retry",
-    startupTitle: "Codex Web GPT could not start",
+    startupTitle: "CPU — CLI-Plateformes-Unifié could not start",
     startupDetail: "Retry starts the launcher again without changing your saved settings or ChatGPT profile.",
     startupCleanupFailed: "Startup cleanup failed",
     catalogFailure: "Codex reached the launcher, but loading its model catalog failed (HTTP {status}; {reason}). Check Activity for details and export a safe log if it persists.",
     catalogReady: "Codex model list loaded.",
   }),
-  "zh-CN": Object.freeze({
-    openLauncher: "打开 Codex Web GPT",
-    quit: "退出",
-    exportDiagnostics: "导出隐私安全诊断",
-    cancel: "取消",
-    remove: "移除",
-    removeTitle: "移除 Codex Web GPT",
-    removeMessage: "从 Codex 中移除 ChatGPT Web 模型并恢复此前的模型路由？",
-    removeDetail: "启动器中的 ChatGPT 登录 profile 会保留。Codex 需要重启一次。",
-    retry: "重试",
-    startupTitle: "Codex Web GPT 无法启动",
-    startupDetail: "重试会重新启动应用，不会更改已保存的设置或 ChatGPT 登录配置。",
-    startupCleanupFailed: "启动清理失败",
-    catalogFailure: "Codex 已连接到启动器，但模型列表加载失败（HTTP {status}；{reason}）。请查看“活动”了解详情；若问题持续，请导出安全日志。",
-    catalogReady: "Codex 模型列表已加载。",
-  }),
-  "zh-TW": Object.freeze({
-    openLauncher: "開啟 Codex Web GPT",
-    quit: "結束",
-    exportDiagnostics: "匯出隱私安全診斷",
-    cancel: "取消",
-    remove: "移除",
-    removeTitle: "移除 Codex Web GPT",
-    removeMessage: "從 Codex 中移除 ChatGPT Web 模型並還原先前的模型路由？",
-    removeDetail: "啟動器中的 ChatGPT 登入設定檔會保留。Codex 需要重新啟動一次。",
-    retry: "重試",
-    startupTitle: "Codex Web GPT 無法啟動",
-    startupDetail: "重試會重新啟動應用程式，不會變更已儲存的設定或 ChatGPT 登入設定檔。",
-    startupCleanupFailed: "啟動清理失敗",
-    catalogFailure: "Codex 已連線到啟動器，但模型清單載入失敗（HTTP {status}；{reason}）。請查看「活動」了解詳情；若問題持續，請匯出安全日誌。",
-    catalogReady: "Codex 模型清單已載入。",
+  "fr": Object.freeze({
+    openLauncher: "Ouvrir CPU — CLI-Plateformes-Unifié",
+    quit: "Quitter",
+    exportDiagnostics: "Exporter les diagnostics sécurisés",
+    cancel: "Annuler",
+    remove: "Supprimer",
+    removeTitle: "Supprimer CPU — CLI-Plateformes-Unifié",
+    removeMessage: "Supprimer les modèles ChatGPT Web de Codex et restaurer la route de modèle précédente ?",
+    removeDetail: "Le profil de connexion ChatGPT du lanceur sera conservé. Codex devra être redémarré une fois.",
+    retry: "Réessayer",
+    startupTitle: "CPU — CLI-Plateformes-Unifié n'a pas pu démarrer",
+    startupDetail: "Réessayer relance l'application sans modifier vos paramètres enregistrés ni votre profil ChatGPT.",
+    startupCleanupFailed: "Échec du nettoyage au démarrage",
+    catalogFailure: "Codex a joint le lanceur, mais le chargement du catalogue de modèles a échoué (HTTP {status} ; {reason}). Consultez Activité pour les détails et exportez un journal sécurisé si le problème persiste.",
+    catalogReady: "Liste des modèles Codex chargée.",
   }),
   "ja": Object.freeze({
-    openLauncher: "Codex Web GPT を開く",
+    openLauncher: "CPU — CLI-Plateformes-Unifié を開く",
     quit: "終了",
     exportDiagnostics: "プライバシー保護済みの診断情報をエクスポート",
     cancel: "キャンセル",
     remove: "削除",
-    removeTitle: "Codex Web GPT を削除",
+    removeTitle: "CPU — CLI-Plateformes-Unifié を削除",
     removeMessage: "Codex から ChatGPT Web モデルを削除し、以前のモデルルートを復元しますか？",
     removeDetail: "ランチャーの ChatGPT ログインプロファイルは保持されます。Codex を一度再起動する必要があります。",
     retry: "再試行",
-    startupTitle: "Codex Web GPT を起動できませんでした",
+    startupTitle: "CPU — CLI-Plateformes-Unifié を起動できませんでした",
     startupDetail: "保存済みの設定と ChatGPT プロファイルを変更せずに、ランチャーを再起動します。",
     startupCleanupFailed: "起動後のクリーンアップに失敗しました",
     catalogFailure: "Codex はランチャーに接続しましたが、モデル一覧を読み込めませんでした（HTTP {status}、{reason}）。「アクティビティ」で詳細を確認し、問題が続く場合は安全なログをエクスポートしてください。",
     catalogReady: "Codex のモデル一覧を読み込みました。",
   }),
   "ko": Object.freeze({
-    openLauncher: "Codex Web GPT 열기",
+    openLauncher: "CPU — CLI-Plateformes-Unifié 열기",
     quit: "종료",
     exportDiagnostics: "개인정보가 보호된 진단 정보 내보내기",
     cancel: "취소",
     remove: "제거",
-    removeTitle: "Codex Web GPT 제거",
+    removeTitle: "CPU — CLI-Plateformes-Unifié 제거",
     removeMessage: "Codex에서 ChatGPT Web 모델을 제거하고 이전 모델 경로를 복원할까요?",
     removeDetail: "런처의 ChatGPT 로그인 프로필은 유지됩니다. Codex를 한 번 다시 시작해야 합니다.",
     retry: "다시 시도",
-    startupTitle: "Codex Web GPT를 시작할 수 없습니다",
+    startupTitle: "CPU — CLI-Plateformes-Unifié를 시작할 수 없습니다",
     startupDetail: "저장된 설정이나 ChatGPT 프로필을 변경하지 않고 런처를 다시 시작합니다.",
     startupCleanupFailed: "시작 정리에 실패했습니다",
     catalogFailure: "Codex가 런처에 연결했지만 모델 목록을 불러오지 못했습니다(HTTP {status}; {reason}). 활동에서 세부 정보를 확인하고 문제가 계속되면 안전한 로그를 내보내 주세요.",
@@ -546,6 +541,16 @@ function syncBrowserPreferences(stateStore, config) {
   return state;
 }
 
+function isRuntimeConfigured(snapshot) {
+  return snapshot?.configured === true || (snapshot?.configured !== false && Boolean(snapshot?.config));
+}
+
+function savePreSetupPreference(stateStore, patch) {
+  const state = stateStore.update(patch);
+  send("launcher:state-changed", state);
+  return state;
+}
+
 function registerIpc({ logger, stateStore }) {
   const dismissSessionReminder = () => {
     const state = stateStore.update({ sessionRefreshReminderAt: nextSessionRefreshReminderAt() });
@@ -624,7 +629,6 @@ function registerIpc({ logger, stateStore }) {
   });
   handle("launcher:complete-onboarding", (_event, language, rawInteractionMode) => {
     const current = stateStore.read();
-    if (!current.githubOpened || !current.xOpened) throw new Error("Open the GitHub and X pages before continuing");
     if (current.autoStart) setAutostart(app, true);
     const next = stateStore.update({
       language: validateLanguage(language),
@@ -678,6 +682,60 @@ function registerIpc({ logger, stateStore }) {
     return browser;
   });
   handle("launcher:browser-passkey-login-continue", () => runtimeHost.continuePasskeyLogin());
+  handle("launcher:open-platform-tab", (_event, providerId) => {
+    const shield = require("./aspace-telemetry-shield.cjs");
+    const provider = shield.ASPACE_MULTI_PLATFORM_PROVIDERS?.[providerId];
+    if (!provider || typeof provider.newChatUrl !== "string") {
+      throw new Error(`Unknown sovereign platform: ${String(providerId)}`);
+    }
+    return browserHost.openPlatformTab(provider);
+  });
+  handle("launcher:superagent-status", () => getSuperAgentSnapshot());
+  handle("launcher:superagent-start", async () => {
+    const existing = await getSuperAgentSnapshot();
+    if (existing.online) return existing;
+    const daemon = startSuperAgentDaemon();
+    for (let i = 0; i < 4; i++) {
+      await new Promise((r) => setTimeout(r, 500));
+      const snap = await getSuperAgentSnapshot();
+      if (snap.online) return { ...snap, daemon };
+    }
+    return { ...(await getSuperAgentSnapshot()), daemon, starting: true };
+  });
+  handle("launcher:superagent-pause", async (_event, paused) => {
+    await orchestratorRequest("POST", "executor/pause", { paused: paused === true });
+    return getSuperAgentSnapshot();
+  });
+  handle("launcher:superagent-retry-ticket", async (_event, ticketId) => {
+    await orchestratorRequest("POST", `tickets/${encodeURIComponent(String(ticketId))}/retry`);
+    return getSuperAgentSnapshot();
+  });
+  handle("launcher:superagent-save-config", (_event, patch) => {
+    ensureSuperAgentProfile();
+    const saved = writeBridgeConfig(patch && typeof patch === "object" ? patch : {});
+    return {
+      saved: true,
+      ld08WebhookConfigured: Boolean(saved.ld08WebhookUrl || process.env.GCHAT_LD08_WEBHOOK_URL),
+      devAutoMergeEnabled: saved.devAutoMergeEnabled !== false,
+    };
+  });
+  handle("launcher:superagent-test-ld08", (_event, input = {}) =>
+    notifyGoogleChatLD08(
+      input?.tag || "person/delivery",
+      input?.message || "CPU — CLI-Plateformes-Unifié connecté à SuperAgent (:3082) / Space LD08",
+      input?.webhookUrl,
+    ),
+  );
+  handle("launcher:superagent-automerge", (_event, input = {}) =>
+    triggerDevAutoMerge(input?.target, input?.repoPath),
+  );
+  handle("launcher:superagent-egm-missions", () => listEgmGoldfishMissions());
+  handle("launcher:superagent-dispatch-manifest", (_event, input = {}) =>
+    dispatchDriveManifestToEgmGoldfish({
+      ...(input && typeof input === "object" ? input : {}),
+      repoRoot: path.resolve(__dirname, "..", ".."),
+    }),
+  );
   handle("launcher:browser-logout", logoutChatGpt);
   handle("launcher:session-reminder-dismiss", dismissSessionReminder);
   handle("launcher:browser-smoke", async () => {
@@ -833,25 +891,20 @@ function registerIpc({ logger, stateStore }) {
         );
       }
     }
-    if (setupState.browserInteractionMode === "automatic"
-      && !setupState.coreSetupComplete
-      && !(smokePassedThisSession || smokePassedForCurrentVersion(setupState))) {
-      throw new Error(
-        IS_DEV_PROFILE
-          ? "Run the browser smoke test before configuring the DEV harness"
-          : "Run the browser smoke test before installing the Codex integration",
-      );
-    }
-    const result = IS_DEV_PROFILE ? await runtimeHost.setupDevCore() : await runtimeHost.setupCore();
+    const result = IS_DEV_PROFILE ? await runtimeHost.setupDevCore(setupState) : await runtimeHost.setupCore(setupState);
+    const snapConfig = runtimeHost.runtimeConfigSnapshot().config;
     stateStore.update({
       coreSetupComplete: true,
       codexCatalogVerified: IS_DEV_PROFILE ? true : false,
       codexRestartRequired: IS_DEV_PROFILE ? false : true,
-      biggerContextAvailable: typeof runtimeHost.runtimeConfigSnapshot().config?.solAvailable === "boolean",
-      zeroRiskProEnabled: runtimeHost.runtimeConfigSnapshot().config?.zeroRiskProEnabled === true,
-      experimentalFreshConversationPerTurn: runtimeHost.runtimeConfigSnapshot().config?.experimentalFreshConversationPerTurn === true,
-      useTemporaryChats: runtimeHost.runtimeConfigSnapshot().config?.useTemporaryChats !== false,
-      autoApproveToolCalls: runtimeHost.runtimeConfigSnapshot().config?.autoApproveToolCalls === true,
+      biggerContextAvailable: typeof snapConfig?.solAvailable === "boolean",
+      experimentalBiggerContext: snapConfig ? snapConfig.experimentalBiggerContext === true : setupState.experimentalBiggerContext === true,
+      composerPredictionsEnabled: snapConfig ? snapConfig.composerPredictionsEnabled !== false : setupState.composerPredictionsEnabled !== false,
+      experimentalSkillAttachments: snapConfig ? snapConfig.experimentalSkillAttachments === true : setupState.experimentalSkillAttachments === true,
+      zeroRiskProEnabled: snapConfig ? snapConfig.zeroRiskProEnabled === true : setupState.zeroRiskProEnabled === true,
+      experimentalFreshConversationPerTurn: snapConfig ? snapConfig.experimentalFreshConversationPerTurn === true : setupState.experimentalFreshConversationPerTurn === true,
+      useTemporaryChats: snapConfig ? snapConfig.useTemporaryChats !== false : setupState.useTemporaryChats !== false,
+      autoApproveToolCalls: snapConfig ? snapConfig.autoApproveToolCalls === true : setupState.autoApproveToolCalls === true,
       ...(result.mode === "full" ? {
         mcpRuntimeInstalled: true,
         mcpSetupComplete: false,
@@ -884,6 +937,7 @@ function registerIpc({ logger, stateStore }) {
       runtimeKey: typeof input?.runtimeKey === "string" ? input.runtimeKey : "",
       replace: input?.replace === true,
       interactionMode,
+      preferences: stateStore.read(),
     }, afterRuntimeReady);
     if (!interactionModeChange && interactionMode === "automatic") await browserHost.reveal();
     const result = interactionModeChange
@@ -938,6 +992,9 @@ function registerIpc({ logger, stateStore }) {
     };
   });
   handle("launcher:bigger-context", async (_event, enabled) => {
+    if (!isRuntimeConfigured(runtimeHost.runtimeConfigSnapshot())) {
+      return savePreSetupPreference(stateStore, { experimentalBiggerContext: enabled === true });
+    }
     const result = await runtimeHost.setBiggerContext(enabled === true);
     syncBrowserPreferences(stateStore, runtimeHost.runtimeConfigSnapshot().config);
     const state = stateStore.update({
@@ -953,12 +1010,18 @@ function registerIpc({ logger, stateStore }) {
     if (browserHost.activeTraceId || browserHost.currentOperation()) {
       throw new Error("Finish or cancel active ChatGPT turns before changing next-message predictions");
     }
+    if (!isRuntimeConfigured(runtimeHost.runtimeConfigSnapshot())) {
+      return savePreSetupPreference(stateStore, { composerPredictionsEnabled: enabled === true });
+    }
     await runtimeHost.setComposerPredictions(enabled);
     return syncBrowserPreferences(stateStore, runtimeHost.runtimeConfigSnapshot().config);
   });
   handle("launcher:skill-attachments", async (_event, enabled) => {
     if (browserHost.activeTraceId || browserHost.currentOperation()) {
       throw new Error("Finish or cancel active ChatGPT turns before changing Skills as files");
+    }
+    if (!isRuntimeConfigured(runtimeHost.runtimeConfigSnapshot())) {
+      return savePreSetupPreference(stateStore, { experimentalSkillAttachments: enabled === true });
     }
     const result = await runtimeHost.setSkillAttachments(enabled === true);
     const state = stateStore.update({ experimentalSkillAttachments: result.enabled });
@@ -969,6 +1032,9 @@ function registerIpc({ logger, stateStore }) {
     if (browserHost.activeTraceId || browserHost.currentOperation()) {
       throw new Error("Finish or cancel active ChatGPT turns before changing browser conversation retention");
     }
+    if (!isRuntimeConfigured(runtimeHost.runtimeConfigSnapshot())) {
+      return savePreSetupPreference(stateStore, { experimentalFreshConversationPerTurn: enabled === true });
+    }
     await runtimeHost.setFreshConversationPerTurn(enabled);
     return syncBrowserPreferences(stateStore, runtimeHost.runtimeConfigSnapshot().config);
   });
@@ -976,12 +1042,18 @@ function registerIpc({ logger, stateStore }) {
     if (browserHost.activeTraceId || browserHost.currentOperation()) {
       throw new Error("Finish or cancel active ChatGPT turns before changing Temporary Chat");
     }
+    if (!isRuntimeConfigured(runtimeHost.runtimeConfigSnapshot())) {
+      return savePreSetupPreference(stateStore, { useTemporaryChats: enabled === true });
+    }
     await runtimeHost.setTemporaryChats(enabled);
     return syncBrowserPreferences(stateStore, runtimeHost.runtimeConfigSnapshot().config);
   });
   handle("launcher:auto-approve-tool-calls", async (_event, enabled) => {
     if (browserHost.activeTraceId || browserHost.currentOperation()) {
       throw new Error("Finish or cancel active ChatGPT turns before changing tool approvals");
+    }
+    if (!isRuntimeConfigured(runtimeHost.runtimeConfigSnapshot())) {
+      return savePreSetupPreference(stateStore, { autoApproveToolCalls: enabled === true });
     }
     await runtimeHost.setAutoApproveToolCalls(enabled);
     return syncBrowserPreferences(stateStore, runtimeHost.runtimeConfigSnapshot().config);
@@ -994,6 +1066,9 @@ function registerIpc({ logger, stateStore }) {
           ? "Finish or cancel active ChatGPT turns before changing Zero Risk model profiles"
           : `Finish ${browserOperation} before changing Zero Risk model profiles`,
       );
+    }
+    if (!isRuntimeConfigured(runtimeHost.runtimeConfigSnapshot())) {
+      return savePreSetupPreference(stateStore, { zeroRiskProEnabled: enabled === true });
     }
     const result = await runtimeHost.setZeroRiskPro(enabled === true);
     const state = stateStore.update({
