@@ -1,6 +1,6 @@
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
-import { join, resolve } from "node:path";
+import { delimiter, dirname, join, resolve } from "node:path";
 
 export type PalierStage = 1 | 2 | 3;
 
@@ -70,19 +70,85 @@ export function resolveFkb04Root(startDir = import.meta.dir): string {
   return candidates[0]!;
 }
 
-function probeCliVersion(command: string, args: string[] = ["--version"]): { available: boolean; version: string | null } {
+const CLI_PROBE_CACHE_TTL_MS = 60_000;
+const cliProbeCache = new Map<string, { available: boolean; version: string | null; expiresAt: number }>();
+
+function resolveCommandPath(command: string): string | null {
+  const dirs = (process.env.PATH ?? "")
+    .split(delimiter)
+    .map(d => d.trim().replace(/^"|"$/g, ""))
+    .filter(Boolean);
+  if (process.platform === "win32" && process.env.APPDATA) {
+    const npmDir = join(process.env.APPDATA, "npm");
+    if (!dirs.includes(npmDir)) dirs.push(npmDir);
+  }
+  const exts = process.platform === "win32" ? [".exe", ".cmd", ".bat", ""] : [""];
+  for (const dir of dirs) {
+    for (const ext of exts) {
+      const candidate = join(dir, `${command}${ext}`);
+      if (existsSync(candidate)) return candidate;
+    }
+  }
+  return null;
+}
+
+function probeWindowsCmdShim(command: string, shimPath: string): { available: boolean; version: string | null } | null {
   try {
-    const result = spawnSync(command, args, {
-      encoding: "utf8",
-      timeout: 3000,
-      windowsHide: true,
-      shell: process.platform === "win32",
-    });
-    if (result.status !== 0) return { available: false, version: null };
-    const line = (result.stdout || result.stderr || "").trim().split(/\r?\n/)[0] || null;
-    return { available: true, version: line };
+    const dir = dirname(shimPath);
+    const pkgPath = join(dir, "node_modules", command, "package.json");
+    if (!existsSync(pkgPath)) return null;
+    const cmdText = readFileSync(shimPath, "utf8");
+    const relMatch = cmdText.match(/%~dp0([^\s"]+\.(?:exe|js|mjs|cjs))/i);
+    const absMatch = cmdText.match(/"([A-Za-z]:[^"]+\.(?:exe|js|mjs|cjs))"/i);
+    if (relMatch?.[1]) {
+      if (!existsSync(join(dir, relMatch[1]))) return { available: false, version: null };
+    } else if (absMatch?.[1]) {
+      if (!existsSync(absMatch[1])) return { available: false, version: null };
+    }
+    const pkg = JSON.parse(readFileSync(pkgPath, "utf8")) as { version?: unknown };
+    const version = typeof pkg.version === "string" && pkg.version.trim() ? `${command} ${pkg.version.trim()}` : null;
+    return { available: true, version };
   } catch {
-    return { available: false, version: null };
+    return null;
+  }
+}
+
+function probeCliVersion(command: string, args: string[] = ["--version"]): { available: boolean; version: string | null } {
+  const cacheKey = `${command}\0${args.join("\0")}\0${process.env.PATH ?? ""}`;
+  const cached = cliProbeCache.get(cacheKey);
+  if (cached && Date.now() < cached.expiresAt) {
+    return { available: cached.available, version: cached.version };
+  }
+  const resolved = resolveCommandPath(command);
+  if (!resolved) {
+    const miss = { available: false, version: null };
+    cliProbeCache.set(cacheKey, { ...miss, expiresAt: Date.now() + CLI_PROBE_CACHE_TTL_MS });
+    return miss;
+  }
+  if (process.platform === "win32" && /\.(cmd|bat)$/i.test(resolved)) {
+    const fast = probeWindowsCmdShim(command, resolved);
+    if (fast) {
+      cliProbeCache.set(cacheKey, { ...fast, expiresAt: Date.now() + CLI_PROBE_CACHE_TTL_MS });
+      return fast;
+    }
+  }
+  try {
+    const useShell = process.platform === "win32" && /\.(cmd|bat)$/i.test(resolved);
+    const result = spawnSync(useShell ? command : resolved, args, {
+      encoding: "utf8",
+      timeout: 2500,
+      windowsHide: true,
+      shell: useShell,
+    });
+    const out = result.status === 0
+      ? { available: true, version: (result.stdout || result.stderr || "").trim().split(/\r?\n/)[0] || null }
+      : { available: false, version: null };
+    cliProbeCache.set(cacheKey, { ...out, expiresAt: Date.now() + CLI_PROBE_CACHE_TTL_MS });
+    return out;
+  } catch {
+    const errOut = { available: false, version: null };
+    cliProbeCache.set(cacheKey, { ...errOut, expiresAt: Date.now() + CLI_PROBE_CACHE_TTL_MS });
+    return errOut;
   }
 }
 

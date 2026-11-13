@@ -5,38 +5,9 @@ import { timingSafeEqual } from "node:crypto";
 import { existsSync, rmSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import { stdin, stdout } from "node:process";
-import { captureSystemBrowserLoginToFile, checkBrowserEngine, loginToChatGpt } from "./browser-login";
-import { defaultConfig, getConfigDir, getConfigPath, loadConfig, loadConfigForSetup } from "./config";
-import {
-  inspectLauncherBrowserHost,
-  inspectLauncherBrowserHostLiveness,
-  readLauncherBrowserHostDescriptor,
-} from "./launcher-browser-host";
-import {
-  activateCodexIntegration,
-  deactivateCodexIntegration,
-  inspectCodexIntegration,
-  readCodexSubagentProtocol,
-  setCodexSubagentProtocol,
-  uninstallCodexIntegration,
-} from "./codex-integration";
-import { formatDoctorReport, runDoctor } from "./doctor";
-import { runChatGptMcpMain } from "./adapters/chatgpt-web/mcp-main";
-import { runCommand } from "./process";
-import { startServer } from "./server";
-import { assertServiceIdle, cancelActiveTurns, getServiceStatus, installService, interruptActiveTurn, restartService, startService, stopService, uninstallService } from "./service";
-import { existingFullSetupCredentials, preflightSetup, setup, type SetupOptions } from "./setup";
-import { installRuntimeKeyBytes, managedRuntimeKeyPath, stopTunnel, tunnelStatus, waitForTunnelReady } from "./tunnel";
-import { getTunnelServiceStatus, restartTunnelService, startTunnelService, stopTunnelService, uninstallTunnelService } from "./tunnel-service";
+import type { SetupOptions } from "./setup";
+import type { AgnosticCliHarness } from "./adapters/aspace-palier-orchestrator";
 import { VERSION } from "./version";
-import { runDevCommand } from "./dev-chat/cli";
-import {
-  collectPalierReadiness,
-  exportCliHarnessConfig,
-  SUPPORTED_CLI_HARNESSES,
-  type AgnosticCliHarness,
-} from "./adapters/aspace-palier-orchestrator";
-import { dispatchDriveManifestToEgmGoldfish } from "./adapters/aspace-superagent-bridge";
 
 const HELP = `codex-chatgpt-web ${VERSION}
 
@@ -161,13 +132,14 @@ function assertNoArgs(args: string[]): void {
   if (args.length > 0) throw new Error(`Unknown arguments: ${args.join(" ")}`);
 }
 
-function authorizeLauncherControl(operation: string): void {
+async function authorizeLauncherControl(operation: string): Promise<void> {
   const descriptorPath = process.env.CODEX_CHATGPT_WEB_BROWSER_HOST_DESCRIPTOR?.trim();
   const supplied = process.env.CODEX_WEB_GPT_LAUNCHER_CONTROL_TOKEN?.trim();
   delete process.env.CODEX_WEB_GPT_LAUNCHER_CONTROL_TOKEN;
   if (!descriptorPath || !supplied) {
     throw new Error(`Launcher-controlled ${operation} requires a live launcher authorization`);
   }
+  const { readLauncherBrowserHostDescriptor } = await import("./launcher-browser-host");
   const descriptor = readLauncherBrowserHostDescriptor(descriptorPath);
   const expectedBytes = Buffer.from(descriptor.control.token);
   const suppliedBytes = Buffer.from(supplied);
@@ -246,6 +218,8 @@ function launcherLoginContinuation(): { promise: Promise<void>; close: () => voi
 }
 
 async function loginCommand(args: string[]): Promise<void> {
+  const { captureSystemBrowserLoginToFile, loginToChatGpt } = await import("./browser-login");
+  const { defaultConfig, loadConfig } = await import("./config");
   const launcherControl = takeFlag(args, "--launcher-control");
   if (!launcherControl) {
     assertNoArgs(args);
@@ -261,7 +235,7 @@ async function loginCommand(args: string[]): Promise<void> {
   const chromeExecutablePath = takeOption(args, "--chrome");
   const storageStatePath = takeOption(args, "--storage-state");
   assertNoArgs(args);
-  authorizeLauncherControl("passkey login");
+  await authorizeLauncherControl("passkey login");
   if (process.platform !== "darwin") throw new Error("Passkey sign-in is currently supported only on macOS");
   if (!chromeExecutablePath || !isAbsolute(chromeExecutablePath)) {
     throw new Error("Launcher passkey sign-in requires --chrome with an absolute path");
@@ -286,6 +260,9 @@ async function loginCommand(args: string[]): Promise<void> {
 }
 
 async function setupCommand(args: string[]): Promise<void> {
+  const { getConfigPath, loadConfigForSetup } = await import("./config");
+  const { existingFullSetupCredentials, preflightSetup, setup } = await import("./setup");
+  const { managedRuntimeKeyPath } = await import("./tunnel");
   const preflightOnly = takeFlag(args, "--preflight-only");
   const browserOnly = takeFlag(args, "--browser-only");
   const full = takeFlag(args, "--full");
@@ -406,6 +383,7 @@ async function setupCommand(args: string[]): Promise<void> {
 }
 
 async function doctorCommand(args: string[]): Promise<void> {
+  const { formatDoctorReport, runDoctor } = await import("./doctor");
   const json = takeFlag(args, "--json");
   assertNoArgs(args);
   const report = await runDoctor();
@@ -414,6 +392,7 @@ async function doctorCommand(args: string[]): Promise<void> {
 }
 
 async function routeCommand(args: string[]): Promise<void> {
+  const { activateCodexIntegration, deactivateCodexIntegration, inspectCodexIntegration } = await import("./codex-integration");
   const action = args.shift() ?? "status";
   const forRuntimeRecovery = action === "disconnect" && takeFlag(args, "--for-runtime-recovery");
   assertNoArgs(args);
@@ -442,6 +421,8 @@ async function routeCommand(args: string[]): Promise<void> {
 }
 
 async function subagentsCommand(args: string[]): Promise<void> {
+  const { loadConfig } = await import("./config");
+  const { inspectCodexIntegration, readCodexSubagentProtocol, setCodexSubagentProtocol } = await import("./codex-integration");
   const action = args.shift() ?? "status";
   assertNoArgs(args);
   const config = loadConfig();
@@ -469,6 +450,8 @@ async function subagentsCommand(args: string[]): Promise<void> {
 }
 
 async function serviceCommand(args: string[]): Promise<void> {
+  const { loadConfig } = await import("./config");
+  const { cancelActiveTurns, getServiceStatus, installService, restartService, startService, stopService } = await import("./service");
   const action = args.shift() ?? "status";
   assertNoArgs(args);
   const config = action === "status" ? undefined : loadConfig();
@@ -487,6 +470,8 @@ async function serviceCommand(args: string[]): Promise<void> {
 }
 
 async function interruptHookCommand(args: string[]): Promise<void> {
+  const { loadConfig } = await import("./config");
+  const { interruptActiveTurn } = await import("./service");
   assertNoArgs(args);
   const chunks: Buffer[] = [];
   let bytes = 0;
@@ -513,6 +498,10 @@ async function interruptHookCommand(args: string[]): Promise<void> {
 }
 
 async function tunnelCommand(args: string[]): Promise<void> {
+  const { loadConfig } = await import("./config");
+  const { assertServiceIdle } = await import("./service");
+  const { installRuntimeKeyBytes, managedRuntimeKeyPath, stopTunnel, tunnelStatus, waitForTunnelReady } = await import("./tunnel");
+  const { getTunnelServiceStatus, restartTunnelService, startTunnelService, stopTunnelService } = await import("./tunnel-service");
   const action = args.shift() ?? "status";
   assertNoArgs(args);
   if (action === "key-import") {
@@ -553,6 +542,7 @@ async function openCommand(args: string[]): Promise<void> {
   const url = target ? urls[target] : undefined;
   if (!url) throw new Error("Choose one of: tunnels, runtime-keys, connectors");
   if (process.platform === "darwin") {
+    const { runCommand } = await import("./process");
     const result = runCommand("open", [url]);
     if (result.status !== 0) throw new Error(result.stderr.trim() || `Could not open ${url}`);
   } else {
@@ -561,11 +551,16 @@ async function openCommand(args: string[]): Promise<void> {
 }
 
 async function uninstallCommand(args: string[]): Promise<void> {
+  const { uninstallCodexIntegration } = await import("./codex-integration");
+  const { getConfigDir, getConfigPath, loadConfig } = await import("./config");
+  const { assertServiceIdle, getServiceStatus, uninstallService } = await import("./service");
+  const { stopTunnel } = await import("./tunnel");
+  const { uninstallTunnelService } = await import("./tunnel-service");
   const yes = takeFlag(args, "--yes");
   const keepData = takeFlag(args, "--keep-data");
   const launcherControl = takeFlag(args, "--launcher-control");
   assertNoArgs(args);
-  if (launcherControl) authorizeLauncherControl("uninstall");
+  if (launcherControl) await authorizeLauncherControl("uninstall");
   if (!yes && !await confirm("Restore Codex config, stop services, and remove this installation?")) {
     throw new Error("Uninstall cancelled");
   }
@@ -613,6 +608,9 @@ async function main(): Promise<void> {
   else if (command === "route") await routeCommand(args);
   else if (command === "subagents") await subagentsCommand(args);
   else if (command === "browser") {
+    const { checkBrowserEngine } = await import("./browser-login");
+    const { loadConfig } = await import("./config");
+    const { inspectLauncherBrowserHost, inspectLauncherBrowserHostLiveness } = await import("./launcher-browser-host");
     const action = args.shift();
     assertNoArgs(args);
     if (action !== "check") throw new Error("Browser command must be: browser check");
@@ -630,13 +628,15 @@ async function main(): Promise<void> {
       stdout.write("Playwright can launch the configured Chrome executable.\n");
     }
   } else if (command === "serve") {
+    const { loadConfig } = await import("./config");
+    const { startServer } = await import("./server");
     assertNoArgs(args);
     const config = loadConfig();
     const server = startServer(config);
     stdout.write(`codex-chatgpt-web ${VERSION} listening on http://${config.host}:${server.port}/v1 (${config.mode})\n`);
     await new Promise<void>(() => {});
-  } else if (command === "dev") await runDevCommand(args);
-  else if (command === "mcp") await runChatGptMcpMain(args);
+  } else if (command === "dev") await (await import("./dev-chat/cli")).runDevCommand(args);
+  else if (command === "mcp") await (await import("./adapters/chatgpt-web/mcp-main")).runChatGptMcpMain(args);
   else if (command === "service") await serviceCommand(args);
   else if (command === "hook") {
     const action = args.shift();
@@ -648,10 +648,12 @@ async function main(): Promise<void> {
   else if (command === "palier") {
     const action = args.shift() ?? "status";
     if (action === "status") {
+      const { collectPalierReadiness } = await import("./adapters/aspace-palier-orchestrator");
       takeFlag(args, "--json");
       assertNoArgs(args);
       stdout.write(`${JSON.stringify(collectPalierReadiness(), null, 2)}\n`);
     } else if (action === "export") {
+      const { exportCliHarnessConfig, SUPPORTED_CLI_HARNESSES } = await import("./adapters/aspace-palier-orchestrator");
       const harness = (args.shift() ?? "codex") as AgnosticCliHarness;
       const portRaw = takeOption(args, "--port");
       assertNoArgs(args);
@@ -681,6 +683,7 @@ async function main(): Promise<void> {
       if (!manifestName) {
         throw new Error("Usage: palier dispatch-manifest --name <file> [--id <driveId>] [--folder V0.1] [--excerpt <text>] [--out <dir>] [--json]");
       }
+      const { dispatchDriveManifestToEgmGoldfish } = await import("./adapters/aspace-superagent-bridge");
       const result = await dispatchDriveManifestToEgmGoldfish({
         manifestName,
         manifestId: manifestId?.trim() || undefined,
