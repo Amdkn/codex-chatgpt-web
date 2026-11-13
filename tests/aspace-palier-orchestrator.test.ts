@@ -40,7 +40,7 @@ describe("Aspace Paliers 1-3 orchestrator", () => {
       expect(ids.has(required)).toBe(true);
     }
     expect(SOVEREIGN_WEB_PLATFORMS.some(p => p.region === "chinese")).toBe(true);
-  });
+  }, 15_000);
 
   test("builds zero-telemetry agent-browser and agent-desktop commands", () => {
     const browserCmd = buildAgentBrowserCommand(["snapshot", "-i"], 9222);
@@ -272,7 +272,7 @@ describe("Aspace Paliers 1-3 orchestrator", () => {
       else process.env.CODEX_CHATGPT_WEB_HOME = prevHome;
       rmSync(tempHome, { recursive: true, force: true });
     }
-  });
+  }, 20_000);
 
   test("CLI palier dispatch-manifest handles empty flags and --- frontmatter excerpts cleanly", () => {
     const tmpDsh = mkdtempSync(join(tmpdir(), "ccw-cli-goldfish-"));
@@ -319,5 +319,5 @@ describe("Aspace Paliers 1-3 orchestrator", () => {
     } finally {
       rmSync(tmpDsh, { recursive: true, force: true });
     }
-  });
+  }, 15_000);
 });

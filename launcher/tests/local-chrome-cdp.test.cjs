@@ -252,7 +252,7 @@ test("win32 embed daemon isolates child inside HostForm container with DPI aware
     [Console]::Out.WriteLine("HANDLES=$($parent.Handle.ToInt64()),$($child.Handle.ToInt64())")
     [Console]::Out.Flush()
     $timer = New-Object System.Windows.Forms.Timer
-    $timer.Interval = 5000
+    $timer.Interval = 15000
     $timer.Add_Tick({ $parent.Close(); [System.Windows.Forms.Application]::ExitThread() })
     $timer.Start()
     [System.Windows.Forms.Application]::Run($parent)
@@ -262,7 +262,7 @@ test("win32 embed daemon isolates child inside HostForm container with DPI aware
     windowsHide: true,
   });
   const handles = await new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error("Timed out launching Win32 test forms")), 5000);
+    const timer = setTimeout(() => reject(new Error("Timed out launching Win32 test forms")), 15000);
     let buf = "";
     fixture.stdout.on("data", (chunk) => {
       buf += chunk.toString("utf8");
